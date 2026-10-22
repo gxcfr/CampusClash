@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { Socket } from 'socket.io-client';
 
 export interface UseWebRTCOptions {
-  socket: Socket | null;
+  socket: any;
   roomId: string | null;
   isHost: boolean;
   isOpponentConnected: boolean;
@@ -35,24 +34,40 @@ export function useWebRTC({
   const localStreamRef = useRef<MediaStream | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
 
-  // 1. Initialize Local Media Stream
+  // 1. Initialize Local Media Stream with robust Audio/Video fallback
   useEffect(() => {
     let active = true;
 
     async function startCamera() {
       try {
         setMediaError(null);
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 640 },
-            height: { ideal: 480 },
-            facingMode: 'user',
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
-        });
+        let stream: MediaStream;
+
+        try {
+          // Attempt high quality user video with echo-cancelled audio
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              facingMode: 'user',
+            },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+        } catch (initialErr) {
+          console.warn('Initial camera+mic request failed, falling back to video only:', initialErr);
+          // Fallback to video only in case microphone permission is blocked or device lacks mic
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              facingMode: 'user',
+            },
+            audio: false,
+          });
+        }
 
         if (!active) {
           stream.getTracks().forEach((track) => track.stop());
@@ -61,13 +76,18 @@ export function useWebRTC({
 
         localStreamRef.current = stream;
         setLocalStream(stream);
+
+        // If socket supports setLocalStream (PeerGameAdapter)
+        if (socket && typeof socket.setLocalStream === 'function') {
+          socket.setLocalStream(stream);
+        }
       } catch (err: any) {
-        console.warn('Webcam/Mic access denied or unavailable:', err);
+        console.error('Webcam/Mic access denied or unavailable:', err);
         if (active) {
           setMediaError(
             err.name === 'NotAllowedError'
-              ? 'Camera/Mic permission denied. You can still play with manual tap controls!'
-              : 'Camera not detected. Using simulated video mode.'
+              ? 'Camera permission denied. Please allow camera access in browser settings.'
+              : 'Camera not detected. You can still play with manual tap controls!'
           );
         }
       }
@@ -82,7 +102,7 @@ export function useWebRTC({
         localStreamRef.current = null;
       }
     };
-  }, []);
+  }, [socket]);
 
   // 2. Control Remote Audio Muting based on Game Phase (Secret Delivery vs Banter)
   useEffect(() => {
@@ -93,7 +113,22 @@ export function useWebRTC({
     }
   }, [remoteAudioMuted, remoteStream]);
 
-  // 3. Create or Reset PeerConnection
+  // 3. Listen to remote_stream event (emitted by PeerGameAdapter when on Vercel)
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleRemoteStream = (stream: MediaStream) => {
+      setRemoteStream(stream);
+    };
+
+    socket.on('remote_stream', handleRemoteStream);
+
+    return () => {
+      socket.off('remote_stream', handleRemoteStream);
+    };
+  }, [socket]);
+
+  // 4. Create or Reset PeerConnection (for Socket.io signaling backend)
   const createPeerConnection = useCallback(() => {
     if (!socket || !roomId) return null;
 
@@ -139,12 +174,11 @@ export function useWebRTC({
     return pc;
   }, [socket, roomId]);
 
-  // 4. WebRTC Signaling Listeners
+  // 5. Native WebRTC Signaling Listeners (for Socket.io)
   useEffect(() => {
     if (!socket || !roomId) return;
 
     const handlePeerReady = async () => {
-      // If we are host, initiate the offer
       if (isHost) {
         const pc = createPeerConnection();
         if (!pc) return;
@@ -167,7 +201,6 @@ export function useWebRTC({
     };
 
     const handleOffer = async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
-      // Non-host or receiver handles offer
       let pc = pcRef.current;
       if (!pc) {
         pc = createPeerConnection();
@@ -177,7 +210,6 @@ export function useWebRTC({
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-        // Flush any buffered ICE candidates
         while (pendingCandidatesRef.current.length > 0) {
           const cand = pendingCandidatesRef.current.shift();
           if (cand) {
@@ -204,7 +236,6 @@ export function useWebRTC({
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
 
-        // Flush any buffered candidates
         while (pendingCandidatesRef.current.length > 0) {
           const cand = pendingCandidatesRef.current.shift();
           if (cand) {
@@ -235,7 +266,6 @@ export function useWebRTC({
     socket.on('answer', handleAnswer);
     socket.on('ice_candidate', handleIceCandidate);
 
-    // If opponent is already connected and local stream is ready, broadcast readiness
     if (isOpponentConnected && localStreamRef.current) {
       socket.emit('peer_ready', { roomId });
     }

@@ -30,6 +30,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
   });
   const [handPresent, setHandPresent] = useState(false);
   const [isSampling, setIsSampling] = useState(false);
+  const [gestureLabel, setGestureLabel] = useState<string>('No Hand Detected');
 
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
   const animFrameIdRef = useRef<number | null>(null);
@@ -99,14 +100,6 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
 
   /**
    * Robust Finger Counting & Hand Cricket Number Extraction Logic
-   *
-   * Landmarks indices:
-   * 0: Wrist
-   * 1-4: Thumb (CMC=1, MCP=2, IP=3, TIP=4)
-   * 5-8: Index (MCP=5, PIP=6, DIP=7, TIP=8)
-   * 9-12: Middle (MCP=9, PIP=10, DIP=11, TIP=12)
-   * 13-16: Ring (MCP=13, PIP=14, DIP=15, TIP=16)
-   * 17-20: Pinky (MCP=17, PIP=18, DIP=19, TIP=20)
    */
   const evaluateFingers = useCallback(
     (landmarks: NormalizedLandmark[], handedness: string = 'Right') => {
@@ -136,12 +129,9 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
       const isPinkyExtended = pinkyTip.y < pinkyPip.y;
 
       // 2. Thumb extended check:
-      // Uses tip vs IP x-coordinate and distance from pinky MCP to ensure robustness
-      // across left/right hands and mirrored selfie feeds.
       let isThumbExtended = false;
       const isHandRight = handedness.toLowerCase().includes('right');
 
-      // Distance test: if thumb tip is far away from palm/pinky base
       const thumbToPinkyDist = Math.hypot(thumbTip.x - pinkyMcp.x, thumbTip.y - pinkyMcp.y);
       const thumbMcpToPinkyDist = Math.hypot(thumbMcp.x - pinkyMcp.x, thumbMcp.y - pinkyMcp.y);
 
@@ -151,8 +141,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
         isThumbExtended = thumbTip.x > thumbIp.x || thumbToPinkyDist > thumbMcpToPinkyDist * 1.15;
       }
 
-      // Also confirm thumb is not curled down against palm
-      if (thumbTip.y > wrist.y) {
+      if (thumbTip.y > wrist.y + 0.05) {
         isThumbExtended = false;
       }
 
@@ -164,31 +153,33 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
         pinky: isPinkyExtended,
       };
 
-      // Count four main fingers
       const nonThumbFingers = [isIndexExtended, isMiddleExtended, isRingExtended, isPinkyExtended];
       const nonThumbCount = nonThumbFingers.filter(Boolean).length;
       const totalExtendedCount = nonThumbCount + (isThumbExtended ? 1 : 0);
 
       /**
        * Hand Cricket Mapping Specification:
-       * - 0 extended fingers (fist) OR thumb-only = 6 (Classic street cricket rule!)
-       * - 1 finger extended = 1
-       * - 2 fingers extended = 2
-       * - 3 fingers extended = 3
-       * - 4 fingers extended = 4
-       * - 5 fingers extended = 5
+       * - 0 extended fingers (fist) OR thumb-only = 6 (Street cricket rule)
+       * - 1 to 5 extended fingers = 1 to 5 runs
        */
       let cricketNumber = 6;
+      let label = 'Fist / Thumb = 6';
 
-      if (totalExtendedCount === 0 || (nonThumbCount === 0 && isThumbExtended)) {
+      if (totalExtendedCount === 0) {
         cricketNumber = 6;
+        label = 'Closed Fist = 6 Runs';
+      } else if (nonThumbCount === 0 && isThumbExtended) {
+        cricketNumber = 6;
+        label = 'Thumb Only = 6 Runs';
       } else if (totalExtendedCount >= 1 && totalExtendedCount <= 5) {
         cricketNumber = totalExtendedCount;
+        label = `${totalExtendedCount} Finger${totalExtendedCount > 1 ? 's' : ''} = ${totalExtendedCount} Run${totalExtendedCount > 1 ? 's' : ''}`;
       } else {
         cricketNumber = 6;
+        label = 'Full Palm = 6 Runs';
       }
 
-      return { cricketNumber, states };
+      return { cricketNumber, states, label };
     },
     []
   );
@@ -201,26 +192,29 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
+      const displayWidth = video.videoWidth || canvas.clientWidth || 640;
+      const displayHeight = video.videoHeight || canvas.clientHeight || 480;
+
+      if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+        canvas.width = displayWidth;
+        canvas.height = displayHeight;
+      }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // MediaPipe Hand Landmark Connections
       const connections = [
-        [0, 1], [1, 2], [2, 3], [3, 4],       // Thumb
-        [0, 5], [5, 6], [6, 7], [7, 8],       // Index
-        [0, 9], [9, 10], [10, 11], [11, 12],  // Middle
-        [0, 13], [13, 14], [14, 15], [15, 16],// Ring
-        [0, 17], [17, 18], [18, 19], [19, 20],// Pinky
-        [5, 9], [9, 13], [13, 17],            // Palm knuckle base
+        [0, 1], [1, 2], [2, 3], [3, 4],
+        [0, 5], [5, 6], [6, 7], [7, 8],
+        [0, 9], [9, 10], [10, 11], [11, 12],
+        [0, 13], [13, 14], [14, 15], [15, 16],
+        [0, 17], [17, 18], [18, 19], [19, 20],
+        [5, 9], [9, 13], [13, 17],
       ];
 
-      // Draw connection lines with neon cyan glow
       ctx.lineWidth = 3;
       ctx.strokeStyle = '#00f3ff';
       ctx.shadowColor = '#00f3ff';
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = 8;
 
       connections.forEach(([startIdx, endIdx]) => {
         const start = landmarks[startIdx];
@@ -233,9 +227,8 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
         ctx.stroke();
       });
 
-      // Draw landmark joints with hot pink glow
       ctx.shadowColor = '#ff007f';
-      ctx.shadowBlur = 12;
+      ctx.shadowBlur = 10;
 
       landmarks.forEach((lm, idx) => {
         ctx.beginPath();
@@ -248,9 +241,9 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
     []
   );
 
-  // Main Detection Loop
+  // Main Detection Loop - Never stalls if videoRef.current mounts dynamically!
   useEffect(() => {
-    if (!isModelReady || !videoRef.current) return;
+    if (!isModelReady) return;
 
     let lastVideoTime = -1;
 
@@ -258,7 +251,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
       const video = videoRef.current;
       const landmarker = handLandmarkerRef.current;
 
-      if (video && landmarker && video.readyState >= 2) {
+      if (video && landmarker && video.readyState >= 2 && !video.paused) {
         if (video.currentTime !== lastVideoTime) {
           lastVideoTime = video.currentTime;
           const startTimeMs = performance.now();
@@ -269,27 +262,27 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
             const landmarks = results.landmarks[0];
             const handedness = results.handednesses?.[0]?.[0]?.categoryName || 'Right';
 
-            const { cricketNumber, states } = evaluateFingers(landmarks, handedness);
+            const { cricketNumber, states, label } = evaluateFingers(landmarks, handedness);
 
             setDetectedNumber(cricketNumber);
             setFingerStates(states);
+            setGestureLabel(label);
 
             if (onDetect) {
               onDetect(cricketNumber);
             }
 
-            // If actively sampling in the final 2 seconds of countdown, push to buffer
             if (isSamplingRef.current) {
               sampleBufferRef.current.push(cricketNumber);
             }
 
-            // Draw to canvas overlay if available
             if (canvasRef?.current) {
               drawLandmarks(landmarks, canvasRef.current, video);
             }
           } else {
             setHandPresent(false);
             setDetectedNumber(null);
+            setGestureLabel('No Hand Detected');
             if (canvasRef?.current) {
               const ctx = canvasRef.current.getContext('2d');
               ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
@@ -310,29 +303,21 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
     };
   }, [isModelReady, evaluateFingers, drawLandmarks, onDetect, videoRef, canvasRef]);
 
-  /**
-   * Start 2-second sampling window
-   */
   const startSampling = useCallback(() => {
     sampleBufferRef.current = [];
     isSamplingRef.current = true;
     setIsSampling(true);
   }, []);
 
-  /**
-   * Stop sampling and return statistical mode (most frequent number 1..6)
-   */
   const stopSampling = useCallback((): number => {
     isSamplingRef.current = false;
     setIsSampling(false);
 
     const buffer = sampleBufferRef.current;
     if (buffer.length === 0) {
-      // Fallback to instantaneous detected number or a sensible 1..6
       return detectedNumber ?? Math.floor(Math.random() * 6) + 1;
     }
 
-    // Frequency map for statistical mode
     const counts: Record<number, number> = {};
     let maxFreq = 0;
     let modeValue = buffer[0];
@@ -355,6 +340,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
     detectedNumber,
     fingerStates,
     handPresent,
+    gestureLabel,
     isSampling,
     startSampling,
     stopSampling,

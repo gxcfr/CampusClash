@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { Socket } from 'socket.io-client';
 import confetti from 'canvas-confetti';
 import {
@@ -19,27 +19,46 @@ import {
   AlertCircle,
   Volume2,
   VolumeX,
-  Target,
   Share2,
+  Hand,
+  Eye,
 } from 'lucide-react';
 
-import type { RoomState, BallResult, PlayerRole } from '../types/game';
+import type { RoomState, BallResult } from '../types/game';
 import { useHandDetection } from '../hooks/useHandDetection';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { sounds } from '../utils/audio';
 
 interface HandCricketArenaProps {
-  socket: Socket | null;
+  socket: Socket | any;
   username: string;
   onLeaveArena: () => void;
 }
+
+const NUMBER_EMOJIS: Record<number, string> = {
+  1: '👆',
+  2: '✌️',
+  3: '🤟',
+  4: '🖖',
+  5: '🖐️',
+  6: '✊',
+};
+
+const NUMBER_LABELS: Record<number, string> = {
+  1: '1 Run (Index)',
+  2: '2 Runs (Index + Middle)',
+  3: '3 Runs (3 Fingers)',
+  4: '4 Runs (Boundary)',
+  5: '5 Runs (Open Palm)',
+  6: '6 Runs (Fist / Thumb)',
+};
 
 export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   socket,
   username,
   onLeaveArena,
 }) => {
-  // Room state from server
+  // Room state from server / peer
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -49,19 +68,20 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   const [showLandmarks, setShowLandmarks] = useState(true);
 
   // Video DOM refs
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Derive player info
   const myPlayerId = socket?.id || '';
-  const myPlayer = roomState?.players[myPlayerId];
-  const isHost = Boolean(myPlayer?.isHost);
+  const myPlayer =
+    roomState?.players[myPlayerId] ||
+    Object.values(roomState?.players || {}).find((p) => p.username === username);
+  const isHost = Boolean(myPlayer?.isHost || (socket as any)?.isHost);
 
   const opponentEntry = Object.entries(roomState?.players || {}).find(
-    ([id]) => id !== myPlayerId
+    ([id, p]) => id !== myPlayerId && p.username !== username
   );
-  const opponentId = opponentEntry?.[0] || null;
   const opponentPlayer = opponentEntry?.[1] || null;
   const isOpponentConnected = Boolean(opponentPlayer);
 
@@ -74,7 +94,6 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     remoteStream,
     isCameraActive,
     isMicActive,
-    connectionState,
     mediaError,
     toggleCamera,
     toggleMic,
@@ -86,19 +105,51 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     remoteAudioMuted: isSecretPhase,
   });
 
-  // Attach local stream to video element
+  // Callback refs to guarantee immediate video playback whenever DOM nodes mount!
+  const setLocalVideoNode = useCallback(
+    (node: HTMLVideoElement | null) => {
+      localVideoRef.current = node;
+      if (node && localStream) {
+        if (node.srcObject !== localStream) {
+          node.srcObject = localStream;
+        }
+        node.play().catch((err) => console.log('Local video play catch:', err));
+      }
+    },
+    [localStream]
+  );
+
+  const setRemoteVideoNode = useCallback(
+    (node: HTMLVideoElement | null) => {
+      remoteVideoRef.current = node;
+      if (node && remoteStream) {
+        if (node.srcObject !== remoteStream) {
+          node.srcObject = remoteStream;
+        }
+        node.play().catch((err) => console.log('Remote video play catch:', err));
+      }
+    },
+    [remoteStream]
+  );
+
+  // Safety effects: re-trigger video assignment on phase changes
   useEffect(() => {
     if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
+      if (localVideoRef.current.srcObject !== localStream) {
+        localVideoRef.current.srcObject = localStream;
+      }
+      localVideoRef.current.play().catch(() => {});
     }
-  }, [localStream]);
+  }, [localStream, roomState?.phase]);
 
-  // Attach remote stream to opponent video element
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
+      if (remoteVideoRef.current.srcObject !== remoteStream) {
+        remoteVideoRef.current.srcObject = remoteStream;
+      }
+      remoteVideoRef.current.play().catch(() => {});
     }
-  }, [remoteStream]);
+  }, [remoteStream, roomState?.phase]);
 
   // 2. Client-side Edge Computer Vision with MediaPipe WASM
   const {
@@ -108,15 +159,19 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     detectedNumber,
     fingerStates,
     handPresent,
+    gestureLabel,
     isSampling,
     startSampling,
     stopSampling,
   } = useHandDetection({
-    videoRef: localVideoRef,
-    canvasRef: showLandmarks ? canvasRef : undefined,
+    videoRef: localVideoRef as React.RefObject<HTMLVideoElement>,
+    canvasRef: showLandmarks ? (canvasRef as React.RefObject<HTMLCanvasElement>) : undefined,
   });
 
-  // Listen to Server Room Events
+  // Active recognized number (either detected or manually selected)
+  const currentPreviewNumber = manualChoice ?? detectedNumber;
+
+  // Listen to Server / Peer Room Events
   useEffect(() => {
     if (!socket) return;
 
@@ -128,17 +183,16 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     const handlePhaseCountdownTick = ({ seconds }: { seconds: number }) => {
       setRoomState((prev) => (prev ? { ...prev, phaseSecondsRemaining: seconds } : null));
 
-      // Audio tick feedback
       if (seconds > 0) {
         sounds.playTick();
       }
 
-      // During Phase 1: in the final 2 seconds (seconds 2 and 1), begin sampling hand landmarks
+      // During Phase 1: in the final 2 seconds, sample hand landmarks
       if (seconds === 2) {
         startSampling();
       }
 
-      // When countdown reaches 0s, stop sampling and automatically submit choice
+      // At 0s, lock in choice
       if (seconds === 0) {
         const sampledMode = stopSampling();
         const finalChoice = manualChoice ?? sampledMode ?? 6;
@@ -272,13 +326,54 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
         </div>
 
         {/* Matchmaking Body */}
-        <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center py-10 space-y-8">
+        <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center py-6 space-y-6">
           {errorMsg && (
             <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-center gap-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               <span>{errorMsg}</span>
             </div>
           )}
+
+          {/* Camera Pre-Check & Gesture Preview Card */}
+          <div className="p-4 rounded-2xl bg-arcade-card/90 border border-arcade-border flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
+            <div className="flex items-center gap-4 w-full sm:w-auto">
+              <div className="relative w-28 h-20 rounded-xl overflow-hidden bg-black border border-slate-700 flex-shrink-0">
+                <video
+                  ref={setLocalVideoNode}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover transform -scale-x-100"
+                />
+                {!localStream && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-slate-500 text-[10px] text-center p-1">
+                    Waiting for camera...
+                  </div>
+                )}
+              </div>
+              <div>
+                <span className="text-[10px] font-bold uppercase text-arcade-cyan tracking-wider block">
+                  Camera & AI Gesture Test
+                </span>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span className="text-xl">
+                    {detectedNumber ? NUMBER_EMOJIS[detectedNumber] : '✋'}
+                  </span>
+                  <span className="font-mono font-bold text-white text-sm">
+                    {detectedNumber ? `${detectedNumber} RUNS` : 'Show hand to camera'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 font-mono">{gestureLabel}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+              <span className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold flex items-center gap-1.5">
+                <Check className="w-3.5 h-3.5" />
+                Edge CV Ready
+              </span>
+            </div>
+          </div>
 
           {/* If waiting for second player in a created room */}
           {roomState?.roomId ? (
@@ -308,7 +403,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-slate-400">
-                  Share this 4-character code with your campus mate to clash!
+                  Share this 4-character code with your friend to play!
                 </p>
               </div>
 
@@ -316,7 +411,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
               <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between text-xs font-semibold">
                   <span className="text-slate-400">Host (Batsman):</span>
-                  <span className="text-white font-mono">{myPlayer?.username} (You)</span>
+                  <span className="text-white font-mono">{myPlayer?.username || username} (You)</span>
                 </div>
                 <div className="flex items-center justify-between text-xs font-semibold">
                   <span className="text-slate-400">Challenger (Bowler):</span>
@@ -357,7 +452,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   </div>
                   <h3 className="font-display text-xl font-bold text-white">Party Mode</h3>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Create a private room code or enter a 4-character code from a friend in your hostel or wing.
+                    Create a private room code or enter a 4-character code from a friend across devices.
                   </p>
                 </div>
 
@@ -383,7 +478,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                       maxLength={4}
                       value={joinCodeInput}
                       onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
-                      placeholder="e.g. MUJ9"
+                      placeholder="e.g. NRCU"
                       className="w-full px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-center font-display font-bold tracking-widest text-white uppercase placeholder-slate-600 focus:outline-none focus:border-arcade-cyan"
                     />
                     <button
@@ -405,7 +500,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   </div>
                   <h3 className="font-display text-xl font-bold text-white">Quick Match Queue</h3>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Auto-match instantly against any student currently waiting across the MUJ campus network.
+                    Auto-match instantly against any student currently waiting across the network.
                   </p>
                 </div>
 
@@ -419,24 +514,6 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
               </div>
             </div>
           )}
-
-          {/* Edge CV Diagnostic Banner */}
-          <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs text-slate-400">
-            <div className="flex items-center gap-2">
-              <Camera className="w-4 h-4 text-arcade-cyan" />
-              <span>
-                Edge Vision Status:{' '}
-                {isModelLoading ? (
-                  <span className="text-amber-400">Loading WASM Models...</span>
-                ) : isModelReady ? (
-                  <span className="text-emerald-400 font-semibold">WebAssembly Active (100% Zero-Cost Client)</span>
-                ) : (
-                  <span className="text-rose-400">Camera Optional (Tap mode enabled)</span>
-                )}
-              </span>
-            </div>
-            <span className="font-mono text-slate-500">Google STUN Ready</span>
-          </div>
         </div>
       </div>
     );
@@ -445,8 +522,6 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   // ----------------------------------------------------
   // VIEW: AUTHORITATIVE GAME ARENA (PHASES 1, 2, 3)
   // ----------------------------------------------------
-  const currentBatsman = Object.values(roomState.players).find((p) => p.role === 'batsman');
-  const currentBowler = Object.values(roomState.players).find((p) => p.role === 'bowler');
   const amIBatsman = myPlayer?.role === 'batsman';
 
   return (
@@ -547,7 +622,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
         {/* ==================================================== */}
         {/* LEFT COLUMN: LOCAL FEED (ME) WITH EDGE CV OVERLAYS */}
         {/* ==================================================== */}
-        <section className="relative rounded-3xl overflow-hidden bg-arcade-card border border-arcade-border flex flex-col justify-between shadow-2xl min-h-[380px] sm:min-h-[440px]">
+        <section className="relative rounded-3xl overflow-hidden bg-arcade-card border border-arcade-border flex flex-col justify-between shadow-2xl min-h-[400px] sm:min-h-[460px]">
           {/* Header Tag */}
           <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
             <span className="px-3 py-1 rounded-xl text-xs font-bold font-mono bg-slate-900/90 text-white border border-slate-700/80 backdrop-blur-md flex items-center gap-1.5">
@@ -568,7 +643,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
           {/* Local Video & Landmark Canvas Overlay */}
           <div className="relative w-full h-full flex-1 flex items-center justify-center bg-black overflow-hidden">
             <video
-              ref={localVideoRef}
+              ref={setLocalVideoNode}
               autoPlay
               playsInline
               muted
@@ -576,43 +651,101 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
             />
             {/* Neon CV Landmark Canvas */}
             <canvas
-              ref={canvasRef}
+              ref={(node) => {
+                canvasRef.current = node;
+              }}
               className="absolute inset-0 w-full h-full object-cover pointer-events-none transform -scale-x-100"
             />
 
-            {/* Media fallback if camera is disabled */}
-            {!isCameraActive && (
-              <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center text-slate-400 gap-2">
-                <CameraOff className="w-10 h-10 text-slate-600" />
-                <span className="text-xs">Camera is turned off</span>
+            {/* Media fallback if camera is disabled or permission issue */}
+            {(!isCameraActive || mediaError) && (
+              <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center text-slate-400 p-6 text-center gap-3">
+                <CameraOff className="w-12 h-12 text-slate-600" />
+                <span className="text-sm font-semibold text-rose-300">
+                  {mediaError || 'Camera is turned off'}
+                </span>
+                <span className="text-xs text-slate-400">
+                  You can use the 1–6 tap buttons below to play manually!
+                </span>
               </div>
             )}
 
-            {/* In-Video Edge CV Realtime HUD */}
+            {/* REAL-TIME NUMBER RECOGNITION LIVE REASSURANCE CARD */}
+            <div className="absolute top-4 right-4 z-20 pointer-events-none">
+              <div className="p-3 rounded-2xl bg-slate-900/95 border-2 border-arcade-cyan/80 shadow-neon-cyan backdrop-blur-md flex items-center gap-3 animate-fadeIn">
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-2xl font-black text-white shadow-lg">
+                  {currentPreviewNumber ? NUMBER_EMOJIS[currentPreviewNumber] : '✋'}
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] uppercase font-extrabold tracking-wider text-arcade-cyan">
+                      RECOGNIZING NOW
+                    </span>
+                    <span className="w-2 h-2 rounded-full bg-arcade-cyan animate-ping" />
+                  </div>
+                  <div className="font-display font-black text-lg text-white">
+                    {currentPreviewNumber ? `${currentPreviewNumber} RUNS` : 'Position Hand'}
+                  </div>
+                  <div className="text-[10px] text-slate-300 font-mono">
+                    {gestureLabel}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* In-Video Bottom Controls */}
             <div className="absolute bottom-4 left-4 right-4 z-20 flex items-end justify-between pointer-events-none">
-              {/* Detected Number Box */}
-              <div className="p-3 rounded-2xl bg-slate-900/90 border border-slate-700/80 backdrop-blur-md space-y-1.5 pointer-events-auto shadow-lg">
-                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block">
-                  Edge Detection
+              {/* Detailed Finger Status Breakdown for User Reassurance */}
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-700/80 backdrop-blur-md space-y-1 pointer-events-auto">
+                <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400 block">
+                  Finger Tracking
                 </span>
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center text-2xl font-black text-white shadow-neon-cyan">
-                    {choiceLockedIn ?? manualChoice ?? detectedNumber ?? (handPresent ? '?' : '—')}
-                  </div>
-                  <div className="text-[11px] text-slate-300 font-mono">
-                    <p className="font-semibold text-white">
-                      {isSampling ? (
-                        <span className="text-amber-400 animate-pulse">SAMPLING (2s)...</span>
-                      ) : choiceLockedIn !== null ? (
-                        <span className="text-emerald-400 font-bold">LOCKED IN</span>
-                      ) : handPresent ? (
-                        'Hand in Frame'
-                      ) : (
-                        'Show Hand to Cam'
-                      )}
-                    </p>
-                    <p className="text-[10px] text-slate-400">Fist/Thumb = 6 Runs</p>
-                  </div>
+                <div className="flex gap-1.5 text-[10px] font-mono">
+                  <span
+                    className={`px-1.5 py-0.5 rounded border ${
+                      fingerStates.thumb
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    Thu
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded border ${
+                      fingerStates.index
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    Idx
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded border ${
+                      fingerStates.middle
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    Mid
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded border ${
+                      fingerStates.ring
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    Rng
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded border ${
+                      fingerStates.pinky
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    Pnk
+                  </span>
                 </div>
               </div>
 
@@ -644,26 +777,39 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
             </div>
           </div>
 
-          {/* Quick Manual Fallback Selector Buttons (1 to 6) */}
+          {/* Quick Manual Fallback Selector Buttons (1 to 6) with Real-Time AI Highlight */}
           <div className="p-3 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between gap-2">
             <span className="text-[10px] font-bold uppercase text-slate-400 hidden sm:inline">
-              Tap Fallback:
+              Tap / Override:
             </span>
             <div className="flex-1 grid grid-cols-6 gap-1.5">
-              {[1, 2, 3, 4, 5, 6].map((num) => (
-                <button
-                  key={num}
-                  onClick={() => setManualChoice(num)}
-                  disabled={roomState.phase !== 'PHASE_1_COUNTDOWN'}
-                  className={`py-1.5 rounded-lg font-mono font-bold text-xs transition-all ${
-                    (manualChoice === num || choiceLockedIn === num)
-                      ? 'bg-arcade-cyan text-slate-950 font-black scale-105 shadow-neon-cyan'
-                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40'
-                  }`}
-                >
-                  {num}
-                </button>
-              ))}
+              {[1, 2, 3, 4, 5, 6].map((num) => {
+                const isAIMatching = detectedNumber === num;
+                const isSelected = manualChoice === num || choiceLockedIn === num;
+
+                return (
+                  <button
+                    key={num}
+                    onClick={() => setManualChoice(num)}
+                    disabled={roomState.phase !== 'PHASE_1_COUNTDOWN'}
+                    className={`relative py-2 rounded-xl font-mono font-bold text-xs transition-all flex flex-col items-center justify-center gap-0.5 ${
+                      isSelected
+                        ? 'bg-arcade-cyan text-slate-950 font-black scale-105 shadow-neon-cyan border-2 border-white'
+                        : isAIMatching
+                        ? 'bg-cyan-950/80 text-arcade-cyan border-2 border-arcade-cyan shadow-sm animate-pulse'
+                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 border border-slate-700'
+                    }`}
+                  >
+                    <span className="text-sm">{NUMBER_EMOJIS[num]}</span>
+                    <span>{num}</span>
+                    {isAIMatching && !isSelected && (
+                      <span className="absolute -top-1.5 px-1 rounded-full text-[8px] font-black uppercase bg-arcade-cyan text-slate-950">
+                        AI
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -671,7 +817,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
         {/* ==================================================== */}
         {/* RIGHT COLUMN: REMOTE OPPONENT FEED WITH CONDITIONAL BLUR */}
         {/* ==================================================== */}
-        <section className="relative rounded-3xl overflow-hidden bg-arcade-card border border-arcade-border flex flex-col justify-between shadow-2xl min-h-[380px] sm:min-h-[440px]">
+        <section className="relative rounded-3xl overflow-hidden bg-arcade-card border border-arcade-border flex flex-col justify-between shadow-2xl min-h-[400px] sm:min-h-[460px]">
           {/* Header Tag */}
           <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
             <span className="px-3 py-1 rounded-xl text-xs font-bold font-mono bg-slate-900/90 text-white border border-slate-700/80 backdrop-blur-md flex items-center gap-1.5">
@@ -692,7 +838,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
           {/* Remote Opponent Video Feed */}
           <div className="relative w-full h-full flex-1 flex items-center justify-center bg-black overflow-hidden">
             <video
-              ref={remoteVideoRef}
+              ref={setRemoteVideoNode}
               autoPlay
               playsInline
               className={`w-full h-full object-cover transition-all duration-700 ${
@@ -701,6 +847,13 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   : 'filter blur-0 scale-100'
               }`}
             />
+
+            {!remoteStream && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 text-slate-500 text-xs p-4 text-center gap-2">
+                <Users className="w-8 h-8 text-slate-600 animate-pulse" />
+                <span>Connecting peer video stream...</span>
+              </div>
+            )}
 
             {/* PHASE 1: CONDITIONAL SECRET DELIVERY MASK OVERLAY */}
             {isSecretPhase && (
@@ -738,10 +891,15 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                 [LOCKED & HIDDEN]
               </span>
             ) : roomState.lastBallResult ? (
-              <span className="font-mono font-bold text-arcade-cyan text-sm">
-                {amIBatsman
-                  ? `Bowler played ${roomState.lastBallResult.bowlerChoice}`
-                  : `Batsman played ${roomState.lastBallResult.batsmanChoice}`}
+              <span className="font-mono font-bold text-arcade-cyan text-sm flex items-center gap-1.5">
+                <span>
+                  {NUMBER_EMOJIS[amIBatsman ? roomState.lastBallResult.bowlerChoice : roomState.lastBallResult.batsmanChoice]}
+                </span>
+                <span>
+                  {amIBatsman
+                    ? `Bowler played ${roomState.lastBallResult.bowlerChoice}`
+                    : `Batsman played ${roomState.lastBallResult.batsmanChoice}`}
+                </span>
               </span>
             ) : (
               <span className="text-slate-500 font-mono">—</span>
@@ -763,9 +921,12 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
               <div className="font-display text-5xl sm:text-6xl font-black text-white text-glow-cyan">
                 {roomState.phaseSecondsRemaining}s
               </div>
-              <p className="text-xs text-slate-300 text-center font-medium">
-                Hold your fingers (1-5) or fist (6) towards the camera. Sampling locks in at 0s!
-              </p>
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono">
+                <Eye className="w-4 h-4 text-arcade-cyan" />
+                <span>
+                  Selected: <strong>{currentPreviewNumber ? `${currentPreviewNumber} Runs` : 'Waiting for hand...'}</strong>
+                </span>
+              </div>
             </div>
           )}
 
@@ -798,15 +959,17 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   <span className="text-[10px] text-slate-400 uppercase block font-sans">
                     Batsman
                   </span>
-                  <div className="w-12 h-12 rounded-xl bg-slate-800 border border-slate-600 flex items-center justify-center text-xl font-black text-arcade-cyan">
-                    {roomState.lastBallResult.batsmanChoice}
+                  <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-600 flex flex-col items-center justify-center text-xl font-black text-arcade-cyan">
+                    <span>{NUMBER_EMOJIS[roomState.lastBallResult.batsmanChoice]}</span>
+                    <span className="text-xs">{roomState.lastBallResult.batsmanChoice}</span>
                   </div>
                 </div>
                 <span className="font-display text-slate-500 font-black text-xl">VS</span>
                 <div className="text-center">
                   <span className="text-[10px] text-slate-400 uppercase block font-sans">Bowler</span>
-                  <div className="w-12 h-12 rounded-xl bg-slate-800 border border-slate-600 flex items-center justify-center text-xl font-black text-arcade-neonPink">
-                    {roomState.lastBallResult.bowlerChoice}
+                  <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-600 flex flex-col items-center justify-center text-xl font-black text-arcade-neonPink">
+                    <span>{NUMBER_EMOJIS[roomState.lastBallResult.bowlerChoice]}</span>
+                    <span className="text-xs">{roomState.lastBallResult.bowlerChoice}</span>
                   </div>
                 </div>
               </div>
@@ -815,7 +978,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
             </div>
           )}
 
-          {/* Phase 3: Banter Window (Max 10s with Next Ball trigger) */}
+          {/* Phase 3: Banter Window */}
           {roomState.phase === 'PHASE_3_BANTER' && (
             <div className="p-6 rounded-3xl bg-arcade-card/95 border border-arcade-border shadow-2xl flex flex-col items-center space-y-4 max-w-md w-full animate-fadeIn">
               <div className="flex items-center gap-2">

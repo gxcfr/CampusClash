@@ -10,16 +10,46 @@ type EventHandler = (...args: any[]) => void;
  */
 export class PeerGameAdapter {
   public id: string;
+  public isHost: boolean = false;
   private peer: Peer | null = null;
   private conn: DataConnection | null = null;
-  private call: MediaConnection | null = null;
+  private mediaCall: MediaConnection | null = null;
+  private localStream: MediaStream | null = null;
   private eventListeners: Record<string, EventHandler[]> = {};
-  private isHost: boolean = false;
   private currentRoom: RoomState | null = null;
   private timerInterval: any = null;
+  private targetPeerId: string | null = null;
 
   constructor() {
     this.id = 'peer_' + Math.random().toString(36).substring(2, 9);
+  }
+
+  // Supply local camera/mic stream for peer calling
+  setLocalStream(stream: MediaStream) {
+    this.localStream = stream;
+
+    // If challenger and connected to host, initiate media call
+    if (!this.isHost && this.targetPeerId && this.peer && !this.mediaCall) {
+      this.initiateMediaCall(this.targetPeerId);
+    }
+  }
+
+  private initiateMediaCall(targetId: string) {
+    if (!this.peer || !this.localStream) return;
+    try {
+      const call = this.peer.call(targetId, this.localStream);
+      this.mediaCall = call;
+
+      call.on('stream', (remoteStream) => {
+        this.trigger('remote_stream', remoteStream);
+      });
+
+      call.on('error', (err) => {
+        console.warn('Media call error:', err);
+      });
+    } catch (err) {
+      console.warn('Failed to initiate media call:', err);
+    }
   }
 
   // Event subscription mimicking socket.io
@@ -51,7 +81,6 @@ export class PeerGameAdapter {
     } else if (event === 'rematch') {
       this.handleRematch();
     } else {
-      // Forward over data channel if connected
       if (this.conn && this.conn.open) {
         this.conn.send({ type: event, payload });
       }
@@ -81,7 +110,10 @@ export class PeerGameAdapter {
 
     this.peer = new Peer(peerId, {
       config: {
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
       },
     });
 
@@ -122,14 +154,34 @@ export class PeerGameAdapter {
       this.trigger('room_update', initialRoom);
     });
 
+    // Handle incoming data connection
     this.peer.on('connection', (connection) => {
       this.conn = connection;
       this.setupConnectionListeners(connection);
     });
 
+    // Handle incoming media call (Challenger calling Host)
+    this.peer.on('call', (call) => {
+      this.mediaCall = call;
+      if (this.localStream) {
+        call.answer(this.localStream);
+      } else {
+        // If local stream not yet ready, wait briefly
+        setTimeout(() => {
+          if (this.localStream) {
+            call.answer(this.localStream);
+          }
+        }, 800);
+      }
+
+      call.on('stream', (remoteStream) => {
+        this.trigger('remote_stream', remoteStream);
+      });
+    });
+
     this.peer.on('error', (err) => {
-      console.warn('Peer error:', err);
-      this.trigger('game_error', { message: 'Network connection issue. Retrying...' });
+      console.warn('Host Peer error:', err);
+      this.trigger('game_error', { message: 'Connection issue. Please retry.' });
     });
   }
 
@@ -137,10 +189,14 @@ export class PeerGameAdapter {
   private handleJoinRoom(code: string, username: string) {
     this.isHost = false;
     const targetPeerId = `campusclash-${code.toUpperCase()}`;
+    this.targetPeerId = targetPeerId;
 
     this.peer = new Peer({
       config: {
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
       },
     });
 
@@ -154,18 +210,34 @@ export class PeerGameAdapter {
           type: 'player_join',
           payload: { id, username: username || 'Challenger' },
         });
+
+        // If local stream already captured, initiate media call to Host
+        if (this.localStream) {
+          this.initiateMediaCall(targetPeerId);
+        }
       });
 
       this.setupConnectionListeners(conn);
     });
 
+    // Also listen for incoming calls
+    this.peer.on('call', (call) => {
+      this.mediaCall = call;
+      if (this.localStream) {
+        call.answer(this.localStream);
+      }
+      call.on('stream', (remoteStream) => {
+        this.trigger('remote_stream', remoteStream);
+      });
+    });
+
     this.peer.on('error', (err) => {
-      this.trigger('game_error', { message: 'Room not found or host unavailable.' });
+      console.warn('Challenger Peer error:', err);
+      this.trigger('game_error', { message: 'Could not connect to room. Check the code.' });
     });
   }
 
   private handleQuickMatch(username: string) {
-    // In serverless mode, create a room with MUJ1 code or join
     this.handleCreateRoom(username);
   }
 
@@ -189,6 +261,16 @@ export class PeerGameAdapter {
         this.broadcastRoom();
         this.trigger('peer_ready', { roomId: this.currentRoom.roomId });
         conn.send({ type: 'peer_ready', payload: { roomId: this.currentRoom.roomId } });
+
+        // If host has stream, call challenger as well for bi-directional AV
+        if (this.localStream && this.peer) {
+          try {
+            const call = this.peer.call(guestId, this.localStream);
+            call.on('stream', (remoteStream) => {
+              this.trigger('remote_stream', remoteStream);
+            });
+          } catch (e) {}
+        }
       } else if (data.type === 'room_update') {
         this.currentRoom = data.payload;
         this.trigger('room_update', data.payload);
@@ -453,6 +535,7 @@ export class PeerGameAdapter {
 
   public disconnect() {
     clearInterval(this.timerInterval);
+    if (this.mediaCall) this.mediaCall.close();
     if (this.conn) this.conn.close();
     if (this.peer) this.peer.destroy();
   }
