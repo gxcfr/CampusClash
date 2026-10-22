@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: 'Space Grotesk', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: #08090e;
+  overflow-x: hidden;
+}
+
+/* Custom Arcade Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0d0f18;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e2438;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00f3ff;
+}
+
+/* Subtle arcade grid overlay */
+.bg-arcade-grid {
+  background-size: 36px 36px;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+}
+
+.text-glow-cyan {
+  text-shadow: 0 0 12px rgba(0, 243, 255, 0.6);
+}
+
+.text-glow-pink {
+  text-shadow: 0 0 12px rgba(255, 0, 127, 0.6);
+}
+
+.text-glow-amber {
+  text-shadow: 0 0 12px rgba(255, 170, 0, 0.6);
+}
+
+.border-glow-cyan {
+  box-shadow: 0 0 15px rgba(0, 243, 255, 0.25);
+}
+
+.border-glow-pink {
+  box-shadow: 0 0 15px rgba(255, 0, 127, 0.25);
+}
