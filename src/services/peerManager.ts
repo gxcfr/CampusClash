@@ -238,7 +238,177 @@ export class PeerGameAdapter {
   }
 
   private handleQuickMatch(username: string) {
-    this.handleCreateRoom(username);
+    this.isHost = false;
+    const initialQueueRoom: RoomState = {
+      roomId: '1v1 QUICK',
+      mode: 'quick',
+      phase: 'MATCHMAKING',
+      phaseSecondsRemaining: 0,
+      players: {
+        [this.id]: {
+          id: this.id,
+          username: username || 'Player',
+          role: 'batsman',
+          isHost: true,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: this.id,
+        },
+      },
+      currentInning: 1,
+      maxOvers: 2,
+      totalBallsPerInning: 12,
+      currentBallsBowled: 0,
+      currentInningRuns: 0,
+      currentInningWickets: 0,
+      targetRuns: null,
+      ballHistory: [],
+      lastBallResult: null,
+      winnerId: null,
+      winMessage: null,
+    };
+
+    this.currentRoom = initialQueueRoom;
+    this.trigger('room_update', initialQueueRoom);
+
+    // Try finding an active peer waiting in public matchmaking pool
+    const queueSlots = ['campusclash-queue-pool-1', 'campusclash-queue-pool-2'];
+    this.tryJoinQueueSlot(queueSlots, 0, username);
+  }
+
+  private tryJoinQueueSlot(slots: string[], index: number, username: string) {
+    if (index >= slots.length) {
+      this.becomeQueueHost(slots[0], username);
+      return;
+    }
+
+    const targetSlot = slots[index];
+    const probePeer = new Peer({
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+      },
+    });
+
+    let hasHandled = false;
+
+    probePeer.on('open', (id) => {
+      this.peer = probePeer;
+      this.id = id;
+      this.targetPeerId = targetSlot;
+      const conn = probePeer.connect(targetSlot);
+      this.conn = conn;
+
+      conn.on('open', () => {
+        hasHandled = true;
+        this.isHost = false;
+        conn.send({
+          type: 'player_join',
+          payload: { id, username: username || 'Challenger' },
+        });
+
+        if (this.localStream) {
+          this.initiateMediaCall(targetSlot);
+        }
+      });
+
+      this.setupConnectionListeners(conn);
+
+      probePeer.on('call', (call) => {
+        this.mediaCall = call;
+        if (this.localStream) {
+          call.answer(this.localStream);
+        }
+        call.on('stream', (remoteStream) => {
+          this.trigger('remote_stream', remoteStream);
+        });
+      });
+    });
+
+    probePeer.on('error', (_err: any) => {
+      if (hasHandled) return;
+      hasHandled = true;
+      try {
+        probePeer.destroy();
+      } catch (e) {}
+
+      // Slot is available with no host -> WE become the host on this slot!
+      this.becomeQueueHost(targetSlot, username);
+    });
+  }
+
+  private becomeQueueHost(slotId: string, username: string) {
+    this.isHost = true;
+    const hostPeer = new Peer(slotId, {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+      },
+    });
+
+    hostPeer.on('open', (id) => {
+      this.peer = hostPeer;
+      this.id = id;
+      const queueRoom: RoomState = {
+        roomId: '1v1 QUICK',
+        mode: 'quick',
+        phase: 'MATCHMAKING',
+        phaseSecondsRemaining: 0,
+        players: {
+          [id]: {
+            id,
+            username: username || 'Player 1',
+            role: 'batsman',
+            isHost: true,
+            score: 0,
+            wickets: 0,
+            currentChoice: null,
+            hasLockedIn: false,
+            avatarSeed: id,
+          },
+        },
+        currentInning: 1,
+        maxOvers: 2,
+        totalBallsPerInning: 12,
+        currentBallsBowled: 0,
+        currentInningRuns: 0,
+        currentInningWickets: 0,
+        targetRuns: null,
+        ballHistory: [],
+        lastBallResult: null,
+        winnerId: null,
+        winMessage: null,
+      };
+
+      this.currentRoom = queueRoom;
+      this.trigger('room_update', queueRoom);
+    });
+
+    hostPeer.on('connection', (connection) => {
+      this.conn = connection;
+      this.setupConnectionListeners(connection);
+    });
+
+    hostPeer.on('call', (call) => {
+      this.mediaCall = call;
+      if (this.localStream) {
+        call.answer(this.localStream);
+      }
+      call.on('stream', (remoteStream) => {
+        this.trigger('remote_stream', remoteStream);
+      });
+    });
+
+    hostPeer.on('error', (err: any) => {
+      console.warn('Queue host error (slot taken, fallback to random room):', err);
+      this.handleCreateRoom(username);
+    });
   }
 
   private setupConnectionListeners(conn: DataConnection) {
@@ -258,6 +428,11 @@ export class PeerGameAdapter {
           hasLockedIn: false,
           avatarSeed: guestId,
         };
+
+        // When in quick match, transition from MATCHMAKING to LOBBY (Opponent matched!)
+        if (this.currentRoom.mode === 'quick') {
+          this.currentRoom.phase = 'LOBBY';
+        }
         this.broadcastRoom();
         this.trigger('peer_ready', { roomId: this.currentRoom.roomId });
         conn.send({ type: 'peer_ready', payload: { roomId: this.currentRoom.roomId } });

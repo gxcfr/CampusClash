@@ -397,8 +397,42 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
             </div>
           </div>
 
-          {/* If waiting for second player in a created room */}
-          {roomState?.roomId ? (
+          {/* Quick Match Searching Radar */}
+          {roomState?.phase === 'MATCHMAKING' ? (
+            <div className="p-8 rounded-3xl bg-arcade-card border border-arcade-border shadow-2xl text-center space-y-6 max-w-lg mx-auto w-full animate-fadeIn">
+              <div className="relative w-20 h-20 mx-auto flex items-center justify-center">
+                <span className="absolute inset-0 rounded-full border-2 border-arcade-cyan animate-ping opacity-60" />
+                <span className="absolute inset-2 rounded-full border border-arcade-cyan animate-pulse" />
+                <div className="w-14 h-14 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 text-arcade-cyan flex items-center justify-center shadow-neon-cyan">
+                  <Users className="w-7 h-7" />
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[10px] uppercase font-bold tracking-widest text-arcade-cyan">
+                  Global Campus Matchmaking
+                </span>
+                <h3 className="mt-1 font-display text-2xl font-black text-white">
+                  SEARCHING FOR 1v1 OPPONENT...
+                </h3>
+                <p className="mt-2 text-xs text-slate-400 max-w-xs mx-auto">
+                  Waiting for another student to join the queue. Pairing is instant and automatic!
+                </p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-400 font-mono flex items-center justify-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                <span>Matchmaking Pool: Online & Listening</span>
+              </div>
+
+              <button
+                onClick={onLeaveArena}
+                className="w-full py-3 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors"
+              >
+                Cancel Matchmaking
+              </button>
+            </div>
+          ) : roomState?.roomId ? (
             <div className="p-8 rounded-3xl bg-arcade-card border border-arcade-border shadow-2xl text-center space-y-6 max-w-lg mx-auto w-full animate-fadeIn">
               <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 text-arcade-cyan mx-auto flex items-center justify-center">
                 <Users className="w-8 h-8 animate-pulse" />
@@ -406,26 +440,30 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
 
               <div>
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Room Access Code
+                  {roomState.mode === 'quick' ? 'Match Found!' : 'Room Access Code'}
                 </span>
                 <div className="mt-2 flex items-center justify-center gap-3">
                   <span className="font-display text-4xl sm:text-5xl font-black text-white tracking-widest bg-slate-900/90 px-6 py-2 rounded-2xl border border-arcade-border text-glow-cyan">
                     {roomState.roomId}
                   </span>
-                  <button
-                    onClick={handleCopyCode}
-                    className="p-3 rounded-xl bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
-                    title="Copy Room Code"
-                  >
-                    {copiedCode ? (
-                      <Check className="w-5 h-5 text-emerald-400" />
-                    ) : (
-                      <Copy className="w-5 h-5" />
-                    )}
-                  </button>
+                  {roomState.mode !== 'quick' && (
+                    <button
+                      onClick={handleCopyCode}
+                      className="p-3 rounded-xl bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
+                      title="Copy Room Code"
+                    >
+                      {copiedCode ? (
+                        <Check className="w-5 h-5 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-5 h-5" />
+                      )}
+                    </button>
+                  )}
                 </div>
                 <p className="mt-2 text-xs text-slate-400">
-                  Share this 4-character code with your friend to play!
+                  {roomState.mode === 'quick'
+                    ? 'Opponent paired via Quick Match queue! Ready to clash.'
+                    : 'Share this 4-character code with your friend to play!'}
                 </p>
               </div>
 
