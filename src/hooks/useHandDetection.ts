@@ -55,41 +55,45 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
 
         if (isCancelled) return;
 
-        let landmarker: HandLandmarker | null = null;
-        let chosenDelegate: 'GPU' | 'CPU' = 'GPU';
-
         const modelUrl =
           'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-        // 1. Attempt GPU delegate first (fastest on desktop and high-end devices)
+        let landmarker: HandLandmarker | null = null;
+        let chosenDelegate: 'GPU' | 'CPU' = 'GPU';
+
+        const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+        const preferredDelegate: 'CPU' | 'GPU' = isAndroid ? 'CPU' : 'GPU';
+        const fallbackDelegate: 'CPU' | 'GPU' = isAndroid ? 'GPU' : 'CPU';
+
+        // 1. Attempt preferred delegate (CPU on Android S25 for stability, GPU on iPhone/Desktop)
         try {
           landmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath: modelUrl,
-              delegate: 'GPU',
+              delegate: preferredDelegate,
             },
             runningMode: 'VIDEO',
             numHands: 1,
-            minHandDetectionConfidence: 0.3,
-            minHandPresenceConfidence: 0.3,
-            minTrackingConfidence: 0.3,
+            minHandDetectionConfidence: 0.25,
+            minHandPresenceConfidence: 0.25,
+            minTrackingConfidence: 0.25,
           });
-          chosenDelegate = 'GPU';
-        } catch (gpuErr) {
-          console.warn('GPU delegate failed on this mobile/browser environment. Falling back to WebAssembly CPU:', gpuErr);
-          // 2. Fallback to CPU delegate (100% compatible with all mobile browsers & Safari WebKit)
+          chosenDelegate = preferredDelegate;
+        } catch (firstErr) {
+          console.warn(`Delegate ${preferredDelegate} failed, falling back to ${fallbackDelegate}:`, firstErr);
+          // 2. Fallback to alternative delegate
           landmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath: modelUrl,
-              delegate: 'CPU',
+              delegate: fallbackDelegate,
             },
             runningMode: 'VIDEO',
             numHands: 1,
-            minHandDetectionConfidence: 0.3,
-            minHandPresenceConfidence: 0.3,
-            minTrackingConfidence: 0.3,
+            minHandDetectionConfidence: 0.25,
+            minHandPresenceConfidence: 0.25,
+            minTrackingConfidence: 0.25,
           });
-          chosenDelegate = 'CPU';
+          chosenDelegate = fallbackDelegate;
         }
 
         if (isCancelled) {
