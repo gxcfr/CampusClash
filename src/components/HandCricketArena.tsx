@@ -109,11 +109,16 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   const setLocalVideoNode = useCallback(
     (node: HTMLVideoElement | null) => {
       localVideoRef.current = node;
-      if (node && localStream) {
-        if (node.srcObject !== localStream) {
-          node.srcObject = localStream;
+      if (node) {
+        node.muted = true;
+        node.setAttribute('playsinline', 'true');
+        node.setAttribute('webkit-playsinline', 'true');
+        if (localStream) {
+          if (node.srcObject !== localStream) {
+            node.srcObject = localStream;
+          }
+          node.play().catch((err) => console.log('Local video play catch:', err));
         }
-        node.play().catch((err) => console.log('Local video play catch:', err));
       }
     },
     [localStream]
@@ -122,11 +127,15 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   const setRemoteVideoNode = useCallback(
     (node: HTMLVideoElement | null) => {
       remoteVideoRef.current = node;
-      if (node && remoteStream) {
-        if (node.srcObject !== remoteStream) {
-          node.srcObject = remoteStream;
+      if (node) {
+        node.setAttribute('playsinline', 'true');
+        node.setAttribute('webkit-playsinline', 'true');
+        if (remoteStream) {
+          if (node.srcObject !== remoteStream) {
+            node.srcObject = remoteStream;
+          }
+          node.play().catch((err) => console.log('Remote video play catch:', err));
         }
-        node.play().catch((err) => console.log('Remote video play catch:', err));
       }
     },
     [remoteStream]
@@ -156,6 +165,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     isModelLoading,
     isModelReady,
     loadError,
+    activeDelegate,
     detectedNumber,
     fingerStates,
     handPresent,
@@ -368,10 +378,22 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
             </div>
 
             <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-              <span className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold flex items-center gap-1.5">
-                <Check className="w-3.5 h-3.5" />
-                Edge CV Ready
-              </span>
+              {loadError ? (
+                <span className="text-xs px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/30 font-semibold flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  Tap Mode (AI Offline)
+                </span>
+              ) : isModelLoading ? (
+                <span className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/30 font-semibold flex items-center gap-1.5 animate-pulse">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Loading Edge AI...
+                </span>
+              ) : (
+                <span className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold flex items-center gap-1.5">
+                  <Check className="w-3.5 h-3.5" />
+                  Edge CV ({activeDelegate || 'WASM'})
+                </span>
+              )}
             </div>
           </div>
 

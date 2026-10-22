@@ -19,6 +19,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
   const [isModelLoading, setIsModelLoading] = useState(true);
   const [isModelReady, setIsModelReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [activeDelegate, setActiveDelegate] = useState<'GPU' | 'CPU' | null>(null);
 
   const [detectedNumber, setDetectedNumber] = useState<number | null>(null);
   const [fingerStates, setFingerStates] = useState<FingerStates>({
@@ -36,8 +37,9 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
   const animFrameIdRef = useRef<number | null>(null);
   const sampleBufferRef = useRef<number[]>([]);
   const isSamplingRef = useRef(false);
+  const lastTimeMsRef = useRef<number>(0);
 
-  // Initialize MediaPipe Tasks-Vision HandLandmarker via official CDN WASM assets
+  // Initialize MediaPipe Tasks-Vision with dual GPU -> CPU fallback for mobile devices
   useEffect(() => {
     let isCancelled = false;
 
@@ -53,32 +55,56 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
 
         if (isCancelled) return;
 
-        // Create HandLandmarker with GPU delegate and single hand detection for high-FPS edge CV
-        const landmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numHands: 1,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
+        let landmarker: HandLandmarker | null = null;
+        let chosenDelegate: 'GPU' | 'CPU' = 'GPU';
+
+        const modelUrl =
+          'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+        // 1. Attempt GPU delegate first (fastest on desktop and high-end devices)
+        try {
+          landmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: modelUrl,
+              delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 1,
+            minHandDetectionConfidence: 0.3,
+            minHandPresenceConfidence: 0.3,
+            minTrackingConfidence: 0.3,
+          });
+          chosenDelegate = 'GPU';
+        } catch (gpuErr) {
+          console.warn('GPU delegate failed on this mobile/browser environment. Falling back to WebAssembly CPU:', gpuErr);
+          // 2. Fallback to CPU delegate (100% compatible with all mobile browsers & Safari WebKit)
+          landmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: modelUrl,
+              delegate: 'CPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 1,
+            minHandDetectionConfidence: 0.3,
+            minHandPresenceConfidence: 0.3,
+            minTrackingConfidence: 0.3,
+          });
+          chosenDelegate = 'CPU';
+        }
 
         if (isCancelled) {
-          landmarker.close();
+          landmarker?.close();
           return;
         }
 
         handLandmarkerRef.current = landmarker;
+        setActiveDelegate(chosenDelegate);
         setIsModelReady(true);
         setIsModelLoading(false);
       } catch (err: any) {
         console.error('Failed to load MediaPipe HandLandmarker:', err);
         if (!isCancelled) {
-          setLoadError(err?.message || 'Failed to initialize edge computer vision');
+          setLoadError(err?.message || 'Failed to initialize edge computer vision on this device.');
           setIsModelLoading(false);
         }
       }
@@ -99,51 +125,58 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
   }, []);
 
   /**
-   * Robust Finger Counting & Hand Cricket Number Extraction Logic
+   * Rotation-Invariant Euclidean Distance Finger Counting
+   * Works on mobile in portrait, landscape, or at any tilted angle!
+   *
+   * Landmarks indices:
+   * 0: Wrist
+   * 1-4: Thumb (CMC=1, MCP=2, IP=3, TIP=4)
+   * 5-8: Index (MCP=5, PIP=6, DIP=7, TIP=8)
+   * 9-12: Middle (MCP=9, PIP=10, DIP=11, TIP=12)
+   * 13-16: Ring (MCP=13, PIP=14, DIP=15, TIP=16)
+   * 17-20: Pinky (MCP=17, PIP=18, DIP=19, TIP=20)
    */
   const evaluateFingers = useCallback(
     (landmarks: NormalizedLandmark[], handedness: string = 'Right') => {
       const wrist = landmarks[0];
+
+      // Helper for 2D euclidean distance
+      const dist = (p1: NormalizedLandmark, p2: NormalizedLandmark) =>
+        Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+      // 1. Four main fingers: Check if tip is extended away from wrist and MCP
+      // A curled finger has its tip much closer to wrist/MCP than its PIP joint!
+      const isIndexExtended =
+        dist(wrist, landmarks[8]) > dist(wrist, landmarks[6]) * 1.15 &&
+        dist(landmarks[5], landmarks[8]) > dist(landmarks[5], landmarks[6]);
+
+      const isMiddleExtended =
+        dist(wrist, landmarks[12]) > dist(wrist, landmarks[10]) * 1.15 &&
+        dist(landmarks[9], landmarks[12]) > dist(landmarks[9], landmarks[10]);
+
+      const isRingExtended =
+        dist(wrist, landmarks[16]) > dist(wrist, landmarks[14]) * 1.15 &&
+        dist(landmarks[13], landmarks[16]) > dist(landmarks[13], landmarks[14]);
+
+      const isPinkyExtended =
+        dist(wrist, landmarks[20]) > dist(wrist, landmarks[18]) * 1.15 &&
+        dist(landmarks[17], landmarks[20]) > dist(landmarks[17], landmarks[18]);
+
+      // 2. Thumb extension check
+      // Checks distance from pinky MCP (knuckle base) and palm center
       const thumbTip = landmarks[4];
       const thumbIp = landmarks[3];
       const thumbMcp = landmarks[2];
-
-      const indexTip = landmarks[8];
-      const indexPip = landmarks[6];
-
-      const middleTip = landmarks[12];
-      const middlePip = landmarks[10];
-
-      const ringTip = landmarks[16];
-      const ringPip = landmarks[14];
-
-      const pinkyTip = landmarks[20];
-      const pinkyPip = landmarks[18];
       const pinkyMcp = landmarks[17];
+      const indexMcp = landmarks[5];
 
-      // 1. Index, Middle, Ring, Pinky extended check:
-      // In web viewport, y increases downward. So tip.y < pip.y means finger points up.
-      const isIndexExtended = indexTip.y < indexPip.y;
-      const isMiddleExtended = middleTip.y < middlePip.y;
-      const isRingExtended = ringTip.y < ringPip.y;
-      const isPinkyExtended = pinkyTip.y < pinkyPip.y;
+      const thumbToPinkyDist = dist(thumbTip, pinkyMcp);
+      const thumbMcpToPinkyDist = dist(thumbMcp, pinkyMcp);
 
-      // 2. Thumb extended check:
-      let isThumbExtended = false;
-      const isHandRight = handedness.toLowerCase().includes('right');
-
-      const thumbToPinkyDist = Math.hypot(thumbTip.x - pinkyMcp.x, thumbTip.y - pinkyMcp.y);
-      const thumbMcpToPinkyDist = Math.hypot(thumbMcp.x - pinkyMcp.x, thumbMcp.y - pinkyMcp.y);
-
-      if (isHandRight) {
-        isThumbExtended = thumbTip.x < thumbIp.x || thumbToPinkyDist > thumbMcpToPinkyDist * 1.15;
-      } else {
-        isThumbExtended = thumbTip.x > thumbIp.x || thumbToPinkyDist > thumbMcpToPinkyDist * 1.15;
-      }
-
-      if (thumbTip.y > wrist.y + 0.05) {
-        isThumbExtended = false;
-      }
+      // Thumb is extended if its tip stretches away from palm base
+      const isThumbExtended =
+        thumbToPinkyDist > thumbMcpToPinkyDist * 1.18 &&
+        dist(thumbTip, indexMcp) > dist(thumbIp, indexMcp);
 
       const states: FingerStates = {
         thumb: isThumbExtended,
@@ -241,21 +274,27 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
     []
   );
 
-  // Main Detection Loop - Never stalls if videoRef.current mounts dynamically!
+  // Main Detection Loop with timestamp protection and error recovery
   useEffect(() => {
     if (!isModelReady) return;
 
-    let lastVideoTime = -1;
+    let isRunning = true;
 
     const detectFrame = () => {
+      if (!isRunning) return;
+
       const video = videoRef.current;
       const landmarker = handLandmarkerRef.current;
 
-      if (video && landmarker && video.readyState >= 2 && !video.paused) {
-        if (video.currentTime !== lastVideoTime) {
-          lastVideoTime = video.currentTime;
-          const startTimeMs = performance.now();
-          const results = landmarker.detectForVideo(video, startTimeMs);
+      // Verify video has actual dimensions and is currently playing
+      if (video && landmarker && video.videoWidth > 0 && video.videoHeight > 0 && !video.paused) {
+        try {
+          // Strictly monotonic timestamp required by MediaPipe Tasks-Vision
+          const now = performance.now();
+          const frameTime = Math.max(now, lastTimeMsRef.current + 1);
+          lastTimeMsRef.current = frameTime;
+
+          const results = landmarker.detectForVideo(video, frameTime);
 
           if (results && results.landmarks && results.landmarks.length > 0) {
             setHandPresent(true);
@@ -282,12 +321,15 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
           } else {
             setHandPresent(false);
             setDetectedNumber(null);
-            setGestureLabel('No Hand Detected');
+            setGestureLabel('Show Hand to Camera');
             if (canvasRef?.current) {
               const ctx = canvasRef.current.getContext('2d');
               ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
             }
           }
+        } catch (frameErr) {
+          // Guard against mobile WebGL frame drops or timing glitches
+          console.warn('Frame detection skipped:', frameErr);
         }
       }
 
@@ -297,6 +339,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
     animFrameIdRef.current = requestAnimationFrame(detectFrame);
 
     return () => {
+      isRunning = false;
       if (animFrameIdRef.current) {
         cancelAnimationFrame(animFrameIdRef.current);
       }
@@ -337,6 +380,7 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
     isModelLoading,
     isModelReady,
     loadError,
+    activeDelegate,
     detectedNumber,
     fingerStates,
     handPresent,
