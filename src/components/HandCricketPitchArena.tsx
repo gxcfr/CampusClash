@@ -186,7 +186,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
       <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-80 bg-gradient-to-b from-[#2a1d12]/20 via-[#10301c]/25 to-[#2a1d12]/20 pointer-events-none border-x border-[#8b6944]/20" />
 
       {/* Top Header: Stadium Scoreboard */}
-      <header className="relative z-30 flex items-center justify-between px-4 py-2 bg-[#121622]/90 backdrop-blur-md border-b border-zinc-800">
+      <header className="relative z-30 shrink-0 flex items-center justify-between px-3 sm:px-4 py-2 bg-[#121622]/90 backdrop-blur-md border-b border-zinc-800">
         <div className="flex items-center gap-2.5">
           <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
           <div>
@@ -234,7 +234,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
       </header>
 
       {/* TOP HALF: Striker's End (Opponent End) */}
-      <div className="relative flex-1 w-full p-2.5 flex flex-col justify-end">
+      <div className="relative flex-1 min-h-0 w-full p-2 flex flex-col justify-end">
         <div className="relative w-full h-full rounded-2xl overflow-hidden border-2 border-emerald-900/50 bg-[#141926] shadow-xl flex items-center justify-center">
           {/* CAMERA FEED OR AVATAR CARD */}
           {!isNoCamera ? (
@@ -339,7 +339,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
       </div>
 
       {/* CENTER HUD: The Pitch Strip, Cricket Ball Timer & Big Outcome Banner */}
-      <div className="relative z-30 h-16 w-full flex items-center justify-center px-4 my-0.5">
+      <div className="relative z-30 shrink-0 h-14 sm:h-16 w-full flex items-center justify-center px-4 my-0.5">
         <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-10 bg-[#422e1b]/30 border-y-2 border-[#8b6944]/40 rounded-xl pointer-events-none flex items-center justify-around">
           <div className="w-10 h-px bg-white/20 rotate-45" />
           <div className="w-10 h-px bg-white/20 -rotate-45" />
@@ -351,7 +351,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
           key={phase + timer}
           animate={{ scale: [1, 1.06, 1] }}
           transition={{ repeat: Infinity, duration: 1.1 }}
-          className="relative z-10 w-16 h-16 rounded-full bg-gradient-to-br from-red-600 via-red-700 to-red-950 border-2 border-white/90 shadow-[0_0_20px_rgba(220,38,38,0.6)] flex flex-col items-center justify-center text-white"
+          className="relative z-10 w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-gradient-to-br from-red-600 via-red-700 to-red-950 border-2 border-white/90 shadow-[0_0_20px_rgba(220,38,38,0.6)] flex flex-col items-center justify-center text-white"
         >
           <div className="absolute inset-0 rounded-full border-r-2 border-dashed border-white/70 pointer-events-none" />
           <span className="text-sm font-black leading-none font-display">
@@ -383,10 +383,24 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Centered Skip Banter Button (Dead Center of Screen on all screens & mobile) */}
+        {phase === 'banter' && (
+          <motion.button
+            initial={{ scale: 0.85, opacity: 0 }}
+            animate={{ scale: [1, 1.05, 1], opacity: 1 }}
+            transition={{ repeat: Infinity, duration: 1.2 }}
+            onClick={onNextBall}
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 px-5 sm:px-7 py-2.5 sm:py-3 rounded-full font-black text-xs sm:text-sm bg-gradient-to-r from-amber-400 via-yellow-300 to-emerald-400 text-slate-950 shadow-[0_0_30px_rgba(245,158,11,0.85)] border-2 border-white flex items-center gap-2 tracking-wide whitespace-nowrap cursor-pointer active:scale-95 transition-transform"
+          >
+            <ArrowRight className="w-4 h-4 sm:w-5 sm:h-5 stroke-[3]" />
+            <span>SKIP BANTER & BOWL NOW ({timer}s)</span>
+          </motion.button>
+        )}
       </div>
 
       {/* BOTTOM HALF: Bowler's End (Local End) */}
-      <div className="relative flex-1 w-full p-2.5 flex flex-col justify-start">
+      <div className="relative flex-1 min-h-0 w-full p-2 flex flex-col justify-start">
         {/* Bowling Crease White Line */}
         <div className="w-full flex items-center justify-between px-4 mb-1 pointer-events-none">
           <div className="h-0.5 w-16 bg-white/40" />
@@ -480,7 +494,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
       </div>
 
       {/* PROMINENT NUMBER SELECTION KEYPAD (1 TO 6) - BOTH MODES */}
-      <div className="relative z-30 w-full max-w-lg mx-auto px-4 py-1.5 bg-[#0d111a]/95 backdrop-blur-md border-t border-zinc-800">
+      <div className="relative z-30 shrink-0 w-full max-w-lg mx-auto px-3 sm:px-4 py-1.5 bg-[#0d111a]/95 backdrop-blur-md border-t border-zinc-800">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1 font-mono">
             <Hand className="w-3 h-3" />
@@ -515,11 +529,11 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
       </div>
 
       {/* STADIUM ACTION FOOTER WITH MUTE & CAMERA BUTTONS */}
-      <footer className="relative z-30 px-4 py-2 bg-[#090c14] border-t border-zinc-800 flex items-center gap-2.5">
+      <footer className="relative z-30 shrink-0 px-3 sm:px-4 py-2 bg-[#090c14] border-t border-zinc-800 flex items-center gap-2">
         {/* Leave Match */}
         <button
           onClick={onLeave}
-          className="p-2.5 rounded-xl bg-red-950/60 border border-red-500/30 text-red-400 hover:bg-red-900/60 transition-colors flex items-center justify-center"
+          className="p-2.5 rounded-xl bg-red-950/60 border border-red-500/30 text-red-400 hover:bg-red-900/60 transition-colors flex items-center justify-center shrink-0"
           title="Leave Match"
         >
           <PhoneOff className="w-4 h-4" />
@@ -529,7 +543,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
         {!isNoCamera && onToggleCamera && (
           <button
             onClick={onToggleCamera}
-            className={`p-2.5 rounded-xl border transition-colors flex items-center justify-center ${
+            className={`p-2.5 rounded-xl border transition-colors flex items-center justify-center shrink-0 ${
               !isCameraActive
                 ? 'bg-red-950/60 border-red-500/40 text-red-400'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
@@ -544,7 +558,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
         {!isNoCamera && onToggleMic && (
           <button
             onClick={onToggleMic}
-            className={`p-2.5 rounded-xl border transition-colors flex items-center justify-center ${
+            className={`p-2.5 rounded-xl border transition-colors flex items-center justify-center shrink-0 ${
               !isMicActive
                 ? 'bg-red-950/60 border-red-500/40 text-red-400'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
@@ -559,7 +573,7 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
         {!isNoCamera && (
           <button
             onClick={toggleRemoteAudio}
-            className={`p-2.5 rounded-xl border transition-colors flex items-center justify-center ${
+            className={`p-2.5 rounded-xl border transition-colors flex items-center justify-center shrink-0 ${
               remoteAudioMuted
                 ? 'bg-red-950/60 border-red-500/40 text-red-400'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
@@ -570,19 +584,19 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
           </button>
         )}
 
-        {/* Action / Next Ball Button */}
+        {/* Action / Status Display */}
         {phase === 'banter' ? (
           <button
             onClick={onNextBall}
-            className="flex-1 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 active:scale-98 text-slate-950 font-black text-xs sm:text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2"
+            className="flex-1 py-2.5 px-3 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 active:scale-98 text-slate-950 font-black text-xs sm:text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2 truncate"
           >
-            <ArrowRight className="w-4 h-4 stroke-[3]" />
-            NEXT DELIVERY NOW
+            <ArrowRight className="w-4 h-4 stroke-[3] shrink-0" />
+            <span className="truncate">NEXT DELIVERY NOW</span>
           </button>
         ) : (
-          <div className="flex-1 py-2.5 px-3 rounded-xl bg-zinc-900 border border-zinc-800 text-center text-xs font-mono font-medium text-emerald-400 flex items-center justify-center gap-2">
-            <Sparkles className="w-3.5 h-3.5 animate-spin-slow" />
-            <span>
+          <div className="flex-1 py-2.5 px-3 rounded-xl bg-zinc-900 border border-zinc-800 text-center text-xs font-mono font-medium text-emerald-400 flex items-center justify-center gap-2 truncate">
+            <Sparkles className="w-3.5 h-3.5 animate-spin-slow shrink-0" />
+            <span className="truncate">
               {phase === 'countdown'
                 ? `Delivery in flight! (${timer}s remaining)`
                 : 'Resolving delivery outcome...'}
@@ -591,8 +605,8 @@ export const HandCricketPitchArena: React.FC<HandCricketPitchArenaProps> = ({
         )}
 
         {/* Footer Version Tag */}
-        <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline">
-          v0.5
+        <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline shrink-0">
+          v0.6
         </span>
       </footer>
     </div>

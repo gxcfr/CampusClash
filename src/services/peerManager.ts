@@ -98,6 +98,8 @@ export class PeerGameAdapter {
       this.handleNextBall();
     } else if (event === 'rematch') {
       this.handleRematch();
+    } else if (event === 'leave_room') {
+      this.handleLeaveRoom();
     } else {
       if (this.conn && this.conn.open) {
         this.conn.send({ type: event, payload });
@@ -128,7 +130,53 @@ export class PeerGameAdapter {
   private handleBroadcastMessage(data: any) {
     if (!data || data.senderId === this.id) return;
 
-    if (data.type === 'player_join') {
+    if (data.type === 'queue_probe') {
+      // If I am also in MATCHMAKING waiting as host, match with this player
+      if (this.currentRoom?.phase === 'MATCHMAKING' && this.isHost) {
+        if (this.id < data.senderId) {
+          const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+          let code = '';
+          for (let i = 0; i < 4; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+          this.currentRoom.roomId = code;
+          this.currentRoom.phase = 'LOBBY';
+          this.currentRoom.players[data.senderId] = {
+            id: data.senderId,
+            username: data.username || 'Challenger',
+            role: 'bowler',
+            isHost: false,
+            score: 0,
+            wickets: 0,
+            currentChoice: null,
+            hasLockedIn: false,
+            avatarSeed: data.senderId,
+          };
+          this.broadcastRoom();
+          if (this.bc) {
+            this.bc.postMessage({
+              type: 'queue_match_found',
+              roomId: code,
+              targetId: data.senderId,
+              payload: this.currentRoom,
+            });
+          }
+        }
+      }
+    } else if (data.type === 'queue_match_found' && data.targetId === this.id) {
+      this.isHost = false;
+      this.targetRoomCode = data.roomId;
+      this.currentRoom = data.payload;
+      this.trigger('room_update', data.payload);
+      this.trigger('peer_ready', { roomId: data.roomId });
+    } else if (data.type === 'player_leave') {
+      if (this.currentRoom && this.currentRoom.roomId === data.roomId) {
+        this.trigger('game_error', { message: 'Opponent left the match. Returned to lobby.' });
+        if (this.isHost && this.currentRoom.players[data.senderId]) {
+          delete this.currentRoom.players[data.senderId];
+          this.currentRoom.phase = 'LOBBY';
+          this.broadcastRoom();
+        }
+      }
+    } else if (data.type === 'player_join') {
       if (this.isHost && this.currentRoom && this.currentRoom.roomId === data.roomId) {
         const guestId = data.senderId;
         this.currentRoom.players[guestId] = {
@@ -324,6 +372,15 @@ export class PeerGameAdapter {
     const targetPeerId = `campusclash-${cleanCode}`;
     this.targetPeerId = targetPeerId;
 
+    // 5.5s fallback timeout if host room does not exist or fails to respond
+    const joinTimeout = setTimeout(() => {
+      if (!this.currentRoom) {
+        this.trigger('game_error', {
+          message: `Unable to connect to room "${cleanCode}". Please verify the code and ensure the host is active.`,
+        });
+      }
+    }, 5500);
+
     // Immediately notify via BroadcastChannel for instant local response
     if (this.bc) {
       this.bc.postMessage({
@@ -350,6 +407,7 @@ export class PeerGameAdapter {
         this.conn = conn;
 
         const sendJoin = () => {
+          clearTimeout(joinTimeout);
           conn.send({
             type: 'player_join',
             payload: { id, username: username || 'Challenger' },
@@ -381,17 +439,24 @@ export class PeerGameAdapter {
 
       this.peer.on('error', (err) => {
         console.warn('Challenger Peer error:', err);
+        clearTimeout(joinTimeout);
         // If not already resolved by BroadcastChannel
         if (!this.currentRoom) {
-          this.trigger('game_error', { message: 'Could not connect to room. Check the 4-letter code.' });
+          this.trigger('game_error', {
+            message: `Could not connect to room "${cleanCode}". Check the 4-letter code and retry.`,
+          });
         }
       });
     } catch (err) {
+      clearTimeout(joinTimeout);
       console.warn('Challenger Peer init error:', err);
+      this.trigger('game_error', {
+        message: 'Network connection failed. Please check your connection and retry.',
+      });
     }
   }
 
-  // 3. Quick Match Queue (with instant Campus Bot fallback)
+  // 3. Quick Match Queue (Searching for real players without forced bot auto-start)
   private handleQuickMatch(username: string, cameraMode?: CameraMode) {
     this.isHost = true;
     this.isBotOpponent = false;
@@ -432,13 +497,8 @@ export class PeerGameAdapter {
     this.currentRoom = initialQueueRoom;
     this.trigger('room_update', initialQueueRoom);
 
-    // Auto-match with Campus Bot after 3.5 seconds if no real player arrives
+    // Keep searching until a player joins or user taps "Play with Campus Bot"
     clearTimeout(this.queueTimeout);
-    this.queueTimeout = setTimeout(() => {
-      if (this.currentRoom?.phase === 'MATCHMAKING') {
-        this.startBotMatch(username, desiredCameraMode);
-      }
-    }, 3500);
 
     // Probe broadcast channel for any other tab in MATCHMAKING
     if (this.bc) {
@@ -449,6 +509,40 @@ export class PeerGameAdapter {
         cameraMode: desiredCameraMode,
       });
     }
+  }
+
+  // Clean room exit and resource release
+  public handleLeaveRoom() {
+    clearTimeout(this.queueTimeout);
+    if (this.timerInterval) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+    if (this.conn) {
+      try {
+        this.conn.send({ type: 'player_leave', payload: { id: this.id } });
+        this.conn.close();
+      } catch (e) {}
+      this.conn = null;
+    }
+    if (this.mediaCall) {
+      try {
+        this.mediaCall.close();
+      } catch (e) {}
+      this.mediaCall = null;
+    }
+    if (this.bc && this.currentRoom) {
+      this.bc.postMessage({
+        type: 'player_leave',
+        roomId: this.currentRoom.roomId,
+        senderId: this.id,
+      });
+    }
+    this.currentRoom = null;
+    this.targetRoomCode = null;
+    this.targetPeerId = null;
+    this.isHost = false;
+    this.isBotOpponent = false;
   }
 
   // 4. Instant Campus Bot Duel

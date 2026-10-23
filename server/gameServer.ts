@@ -601,6 +601,101 @@ io.on('connection', (socket: Socket) => {
     broadcastRoom(room);
   });
 
+  // 8. Voluntary Bot Match Launch
+  socket.on('start_bot_match', ({ username, cameraMode }: { username: string; cameraMode?: 'camera' | 'no-camera' }) => {
+    const qIdx = quickMatchQueue.indexOf(socket.id);
+    if (qIdx !== -1) quickMatchQueue.splice(qIdx, 1);
+
+    const roomId = generateRoomCode();
+    socket.join(roomId);
+
+    const botId = 'bot_campus_' + Math.random().toString(36).substring(2, 6);
+    const botNames = ['Arjun @ Block 4 🤖', 'Kabir @ Tapri 🏏', 'Rohan @ MUJ 🧢', 'Vikram @ Hostel 🏆'];
+    const chosenBotName = botNames[Math.floor(Math.random() * botNames.length)];
+
+    const room: Room = {
+      roomId,
+      mode: 'quick',
+      cameraMode: cameraMode || 'camera',
+      phase: 'LOBBY',
+      phaseSecondsRemaining: 0,
+      players: {
+        [socket.id]: {
+          id: socket.id,
+          username: username || 'Player',
+          role: 'batsman',
+          isHost: true,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: socket.id,
+        },
+        [botId]: {
+          id: botId,
+          username: chosenBotName,
+          role: 'bowler',
+          isHost: false,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: botId,
+        },
+      },
+      currentInning: 1,
+      maxOvers: 2,
+      totalBallsPerInning: 12,
+      currentBallsBowled: 0,
+      currentInningRuns: 0,
+      currentInningWickets: 0,
+      maxWicketsPerInning: 2,
+      targetRuns: null,
+      ballHistory: [],
+      lastBallResult: null,
+      winnerId: null,
+      winMessage: null,
+    };
+
+    rooms[roomId] = room;
+    broadcastRoom(room);
+
+    // Auto-launch duel after 1.5s visual confirmation
+    setTimeout(() => {
+      if (rooms[roomId]?.phase === 'LOBBY') {
+        startPhase1SecretDelivery(rooms[roomId]);
+      }
+    }, 1500);
+  });
+
+  // 9. Leave Room Event
+  socket.on('leave_room', ({ roomId }: { roomId?: string }) => {
+    const qIdx = quickMatchQueue.indexOf(socket.id);
+    if (qIdx !== -1) {
+      quickMatchQueue.splice(qIdx, 1);
+    }
+
+    const targetRoomId = roomId || Object.keys(rooms).find((id) => rooms[id].players[socket.id]);
+    if (targetRoomId && rooms[targetRoomId]) {
+      const room = rooms[targetRoomId];
+      clearRoomTimer(room);
+      delete room.players[socket.id];
+      socket.leave(targetRoomId);
+
+      const humanPlayers = Object.values(room.players).filter((p) => !p.id.startsWith('bot_'));
+      if (humanPlayers.length === 0) {
+        delete rooms[targetRoomId];
+        console.log(`[Room Deleted] Room ${targetRoomId} cleared after player left.`);
+      } else {
+        room.phase = 'LOBBY';
+        broadcastRoom(room);
+        io.to(targetRoomId).emit('game_error', {
+          message: 'Opponent left the match. Returned to lobby.',
+        });
+      }
+    }
+  });
+
   // ------------------------------------------------------------------------
   // WEBRTC SIGNALING RELAY (P2P MESH)
   // ------------------------------------------------------------------------
@@ -638,7 +733,8 @@ io.on('connection', (socket: Socket) => {
         clearRoomTimer(room);
         delete room.players[socket.id];
 
-        if (Object.keys(room.players).length === 0) {
+        const humanPlayers = Object.values(room.players).filter((p) => !p.id.startsWith('bot_'));
+        if (humanPlayers.length === 0) {
           delete rooms[roomId];
         } else {
           room.phase = 'LOBBY';

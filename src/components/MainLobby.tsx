@@ -422,7 +422,7 @@ export const MainLobby: React.FC<MainLobbyProps> = ({
           </div>
         </div>
 
-        {/* Footer & Campus Credits with Version v0.5 */}
+        {/* Footer & Campus Credits with Version v0.6 */}
         <footer className="pt-10 pb-8 border-t border-zinc-800/70 flex flex-col sm:flex-row items-center justify-between text-xs text-zinc-500 gap-4">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
@@ -434,7 +434,7 @@ export const MainLobby: React.FC<MainLobbyProps> = ({
             <span>Zero Cloud Bills</span>
             <span>•</span>
             <span className="px-2 py-0.5 rounded-md bg-zinc-800/80 text-zinc-300 font-bold border border-zinc-700/80">
-              v0.5
+              v0.6
             </span>
           </div>
         </footer>

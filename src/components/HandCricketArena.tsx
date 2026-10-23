@@ -23,6 +23,7 @@ import {
   Hand,
   Bot,
   Play,
+  Loader2,
 } from 'lucide-react';
 
 import type { RoomState, BallResult, CameraMode } from '../types/game';
@@ -62,7 +63,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   const [choiceLockedIn, setChoiceLockedIn] = useState<number | null>(null);
   const [showLandmarks, setShowLandmarks] = useState(true);
   const [selectedCameraMode, setSelectedCameraMode] = useState<CameraMode>(initialCameraMode);
-  const [queueCountdown, setQueueCountdown] = useState<number>(4);
+  const [isJoining, setIsJoining] = useState(false);
 
   // Active camera mode is governed by roomState if in a room, else local selection
   const activeCameraMode: CameraMode = roomState?.cameraMode || selectedCameraMode;
@@ -179,30 +180,13 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   // Active preview number
   const currentPreviewNumber = manualChoice ?? (isCameraMode ? detectedNumber : null);
 
-  // Queue auto-bot countdown
-  useEffect(() => {
-    if (roomState?.phase === 'MATCHMAKING') {
-      setQueueCountdown(4);
-      const interval = setInterval(() => {
-        setQueueCountdown((prev) => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            handleStartBotMatch();
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [roomState?.phase]);
-
   // Listen to Server / Peer Room Events
   useEffect(() => {
     if (!socket) return;
 
     const handleRoomUpdate = (state: RoomState) => {
       setRoomState(state);
+      setIsJoining(false);
       setErrorMsg(null);
     };
 
@@ -252,6 +236,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
 
     const handleError = ({ message }: { message: string }) => {
       setErrorMsg(message);
+      setIsJoining(false);
     };
 
     socket.on('room_update', handleRoomUpdate);
@@ -269,10 +254,36 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     };
   }, [socket, roomState?.roomId, manualChoice, detectedNumber, isCameraMode, startSampling, stopSampling]);
 
+  // Cleanly exit match and reset room
+  const handleExitMatch = useCallback(() => {
+    if (socket && roomState?.roomId) {
+      socket.emit('leave_room', { roomId: roomState.roomId });
+    }
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+    setRoomState(null);
+    setManualChoice(null);
+    setChoiceLockedIn(null);
+    setErrorMsg(null);
+    setIsJoining(false);
+    onLeaveArena();
+  }, [socket, roomState?.roomId, localStream, onLeaveArena]);
+
+  const handleCancelMatchmaking = () => {
+    if (socket && roomState?.roomId) {
+      socket.emit('leave_room', { roomId: roomState.roomId });
+    }
+    setRoomState(null);
+    setErrorMsg(null);
+    setIsJoining(false);
+  };
+
   // Handle Matchmaking Actions
   const handleCreateParty = () => {
     if (!socket) return;
     setErrorMsg(null);
+    setIsJoining(false);
     socket.emit('create_room', {
       username,
       cameraMode: selectedCameraMode,
@@ -284,15 +295,27 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
     const cleanCode = joinCodeInput.trim().toUpperCase();
     if (!socket || !cleanCode) return;
     setErrorMsg(null);
+    setIsJoining(true);
     socket.emit('join_room', {
       roomId: cleanCode,
       username,
     });
+    // Fallback UI timeout in case server/peer connection hangs
+    setTimeout(() => {
+      setIsJoining((prev) => {
+        if (prev) {
+          setErrorMsg(`Unable to join room "${cleanCode}". Please verify code with the host.`);
+          return false;
+        }
+        return false;
+      });
+    }, 6000);
   };
 
   const handleQuickMatch = () => {
     if (!socket) return;
     setErrorMsg(null);
+    setIsJoining(false);
     socket.emit('quick_match', {
       username,
       cameraMode: selectedCameraMode,
@@ -302,6 +325,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
   const handleStartBotMatch = () => {
     if (!socket) return;
     setErrorMsg(null);
+    setIsJoining(false);
     socket.emit('start_bot_match', {
       username,
       cameraMode: selectedCameraMode,
@@ -488,7 +512,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   SEARCHING FOR 1v1 OPPONENT...
                 </h3>
                 <p className="mt-2 text-xs text-zinc-400 max-w-xs mx-auto">
-                  Looking for another student in the queue. Auto-matching with campus bot in {queueCountdown}s!
+                  Waiting in queue for an active campus player to join...
                 </p>
               </div>
 
@@ -498,11 +522,11 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                   className="w-full py-3 px-4 rounded-xl font-bold text-sm text-slate-950 bg-gradient-to-r from-emerald-400 to-teal-400 hover:from-emerald-300 hover:to-teal-300 shadow-md transition-all flex items-center justify-center gap-2"
                 >
                   <Bot className="w-4 h-4" />
-                  Play with Campus Bot Now 🤖
+                  Play with Campus Bot instead 🤖
                 </button>
 
                 <button
-                  onClick={() => setRoomState(null)}
+                  onClick={handleCancelMatchmaking}
                   className="w-full py-2.5 rounded-xl text-xs font-semibold text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
                 >
                   Cancel Matchmaking
@@ -627,10 +651,17 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
                     />
                     <button
                       type="submit"
-                      disabled={joinCodeInput.trim().length !== 4}
-                      className="px-5 rounded-xl font-bold text-xs bg-zinc-800 text-white hover:bg-zinc-700 disabled:opacity-40 transition-colors"
+                      disabled={joinCodeInput.trim().length !== 4 || isJoining}
+                      className="px-5 rounded-xl font-bold text-xs bg-emerald-500 hover:bg-emerald-400 text-slate-950 disabled:opacity-40 transition-colors flex items-center justify-center gap-1.5 min-w-[76px]"
                     >
-                      Join
+                      {isJoining ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Joining...</span>
+                        </>
+                      ) : (
+                        'Join'
+                      )}
                     </button>
                   </form>
                 </div>
@@ -670,10 +701,10 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
           )}
         </div>
 
-        {/* Footer with Version v0.5 */}
+        {/* Footer with Version v0.6 */}
         <footer className="pt-6 border-t border-zinc-800/60 max-w-4xl mx-auto w-full flex items-center justify-between text-xs text-zinc-500">
           <span>CampusClash MUJ — Hand Cricket</span>
-          <span className="font-mono font-semibold">v0.5</span>
+          <span className="font-mono font-semibold">v0.6</span>
         </footer>
       </div>
     );
@@ -721,7 +752,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
           timer={roomState.phaseSecondsRemaining}
           lastBallResult={lastBallFormatted}
           onNextBall={handleNextBall}
-          onLeave={onLeaveArena}
+          onLeave={handleExitMatch}
           onSelectManualChoice={(num) => setManualChoice(num)}
           manualChoice={manualChoice}
           localVideoRef={localVideoRef}
@@ -780,7 +811,7 @@ export const HandCricketArena: React.FC<HandCricketArenaProps> = ({
               <p className="text-sm text-zinc-300 font-medium">{roomState.winMessage}</p>
               <div className="flex gap-3 pt-2">
                 <button
-                  onClick={onLeaveArena}
+                  onClick={handleExitMatch}
                   className="flex-1 py-3 rounded-xl text-xs font-semibold text-zinc-300 bg-zinc-800 hover:bg-zinc-700 transition-colors"
                 >
                   Exit to Lobby

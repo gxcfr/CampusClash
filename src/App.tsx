@@ -28,29 +28,22 @@ export const App: React.FC = () => {
     }
   }, [username]);
 
-  // Connect to Authoritative Signaling or Fallback to P2P Mesh
+  // Connect to Authoritative Signaling Server (via Vite proxy or custom URL) with fallback to P2P Mesh
   useEffect(() => {
     let active = true;
     const customServer = (import.meta as any).env?.VITE_SERVER_URL;
-    const hostname = window.location.hostname;
-    const isLocal =
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('10.');
-
     let activeSocket: Socket | null = null;
     let peerAdapter: PeerGameAdapter | null = null;
     let hasFallback = false;
 
-    if (customServer || isLocal) {
-      const serverPort = 3001;
-      const serverUrl = customServer || `http://${hostname || 'localhost'}:${serverPort}`;
+    // Use custom server if configured, else connect to current origin (which Vite proxies to :3001)
+    const serverUrl = customServer || window.location.origin;
 
+    try {
       const socket = io(serverUrl, {
         transports: ['websocket', 'polling'],
-        timeout: 2000,
-        reconnectionAttempts: 1,
+        timeout: 3000,
+        reconnectionAttempts: 2,
       });
       activeSocket = socket;
 
@@ -69,21 +62,19 @@ export const App: React.FC = () => {
         peerAdapter = new PeerGameAdapter();
         setGameChannel(peerAdapter);
       });
-
-      return () => {
-        active = false;
-        if (activeSocket) activeSocket.disconnect();
-        if (peerAdapter) peerAdapter.disconnect();
-      };
-    } else {
-      peerAdapter = new PeerGameAdapter();
-      setGameChannel(peerAdapter);
-
-      return () => {
-        active = false;
-        if (peerAdapter) peerAdapter.disconnect();
-      };
+    } catch (e) {
+      if (!hasFallback) {
+        hasFallback = true;
+        peerAdapter = new PeerGameAdapter();
+        setGameChannel(peerAdapter);
+      }
     }
+
+    return () => {
+      active = false;
+      if (activeSocket) activeSocket.disconnect();
+      if (peerAdapter) peerAdapter.disconnect();
+    };
   }, []);
 
   // Sync browser back/forward buttons
