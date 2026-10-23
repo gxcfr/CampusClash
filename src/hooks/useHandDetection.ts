@@ -13,10 +13,11 @@ export interface UseHandDetectionOptions {
   videoRef: React.RefObject<HTMLVideoElement>;
   canvasRef?: React.RefObject<HTMLCanvasElement>;
   onDetect?: (num: number | null) => void;
+  enabled?: boolean;
 }
 
-export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetectionOptions) {
-  const [isModelLoading, setIsModelLoading] = useState(true);
+export function useHandDetection({ videoRef, canvasRef, onDetect, enabled = true }: UseHandDetectionOptions) {
+  const [isModelLoading, setIsModelLoading] = useState(enabled);
   const [isModelReady, setIsModelReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activeDelegate, setActiveDelegate] = useState<'GPU' | 'CPU' | null>(null);
@@ -41,6 +42,10 @@ export function useHandDetection({ videoRef, canvasRef, onDetect }: UseHandDetec
 
   // Initialize MediaPipe Tasks-Vision with dual GPU -> CPU fallback for mobile devices
   useEffect(() => {
+    if (!enabled) {
+      setIsModelLoading(false);
+      return;
+    }
     let isCancelled = false;
 
     async function initMediaPipe() {

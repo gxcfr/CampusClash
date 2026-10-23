@@ -40,9 +40,12 @@ export interface InningSummary {
   ballsBowled: number;
 }
 
+export type CameraMode = 'camera' | 'no-camera';
+
 export interface RoomState {
   roomId: string;
   mode: 'party' | 'quick';
+  cameraMode?: CameraMode;
   phase: GamePhase;
   phaseSecondsRemaining: number;
   players: Record<string, Player>;

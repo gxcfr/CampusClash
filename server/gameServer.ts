@@ -56,6 +56,7 @@ interface BallResult {
 interface Room {
   roomId: string;
   mode: 'party' | 'quick';
+  cameraMode: 'camera' | 'no-camera';
   phase: GamePhase;
   phaseSecondsRemaining: number;
   players: Record<string, Player>;
@@ -114,10 +115,16 @@ function startPhase1SecretDelivery(room: Room) {
   room.phase = 'PHASE_1_COUNTDOWN';
   room.phaseSecondsRemaining = 5;
 
-  // Reset player choices for this ball
+  // Reset player choices for this ball (auto-assign bot choice)
   for (const p of Object.values(room.players)) {
-    p.currentChoice = null;
-    p.hasLockedIn = false;
+    if (p.id.startsWith('bot_')) {
+      const botRoll = [1, 2, 2, 3, 4, 4, 5, 6, 6];
+      p.currentChoice = botRoll[Math.floor(Math.random() * botRoll.length)];
+      p.hasLockedIn = true;
+    } else {
+      p.currentChoice = null;
+      p.hasLockedIn = false;
+    }
   }
 
   broadcastRoom(room);
@@ -290,13 +297,14 @@ io.on('connection', (socket: Socket) => {
   console.log(`[Socket Connected] ID: ${socket.id}`);
 
   // 1. Create Party Room
-  socket.on('create_room', ({ username }: { username: string }) => {
+  socket.on('create_room', ({ username, cameraMode }: { username: string; cameraMode?: 'camera' | 'no-camera' }) => {
     const roomId = generateRoomCode();
     socket.join(roomId);
 
     const room: Room = {
       roomId,
       mode: 'party',
+      cameraMode: cameraMode || 'camera',
       phase: 'LOBBY',
       phaseSecondsRemaining: 0,
       players: {
@@ -328,15 +336,16 @@ io.on('connection', (socket: Socket) => {
 
     rooms[roomId] = room;
     broadcastRoom(room);
-    console.log(`[Room Created] Code: ${roomId} by ${username}`);
+    console.log(`[Room Created] Code: ${roomId} by ${username} (Mode: ${room.cameraMode})`);
   });
 
   // 2. Join Party Room
   socket.on('join_room', ({ roomId, username }: { roomId: string; username: string }) => {
-    const room = rooms[roomId?.toUpperCase()];
+    const cleanRoomId = roomId ? roomId.trim().toUpperCase() : '';
+    const room = rooms[cleanRoomId];
 
     if (!room) {
-      socket.emit('game_error', { message: 'Invalid Room Code. Please check and retry.' });
+      socket.emit('game_error', { message: 'Invalid Room Code. Please check the 4-letter code and retry.' });
       return;
     }
 
@@ -346,7 +355,7 @@ io.on('connection', (socket: Socket) => {
       return;
     }
 
-    socket.join(roomId);
+    socket.join(room.roomId);
 
     room.players[socket.id] = {
       id: socket.id,
@@ -361,14 +370,16 @@ io.on('connection', (socket: Socket) => {
     };
 
     broadcastRoom(room);
+    socket.emit('room_update', room);
 
     // Notify peers to prepare WebRTC mesh
-    io.to(roomId).emit('peer_ready', { roomId });
-    console.log(`[Player Joined] ${username} entered Room ${roomId}`);
+    io.to(room.roomId).emit('peer_ready', { roomId: room.roomId });
+    console.log(`[Player Joined] ${username} entered Room ${room.roomId}`);
   });
 
   // 3. Quick Match Queue
-  socket.on('quick_match', ({ username }: { username: string }) => {
+  socket.on('quick_match', ({ username, cameraMode }: { username: string; cameraMode?: 'camera' | 'no-camera' }) => {
+    const desiredMode = cameraMode || 'camera';
     // If waiting opponent in queue
     if (quickMatchQueue.length > 0) {
       const opponentSocketId = quickMatchQueue.shift()!;
@@ -382,12 +393,13 @@ io.on('connection', (socket: Socket) => {
         const room: Room = {
           roomId,
           mode: 'quick',
+          cameraMode: desiredMode,
           phase: 'LOBBY',
           phaseSecondsRemaining: 0,
           players: {
             [opponentSocketId]: {
               id: opponentSocketId,
-              username: 'QuickOpponent',
+              username: (opponentSocket as any)._queuedUsername || 'Challenger 1',
               role: 'batsman',
               isHost: true,
               score: 0,
@@ -398,7 +410,7 @@ io.on('connection', (socket: Socket) => {
             },
             [socket.id]: {
               id: socket.id,
-              username: username || 'Challenger',
+              username: username || 'Challenger 2',
               role: 'bowler',
               isHost: false,
               score: 0,
@@ -430,10 +442,12 @@ io.on('connection', (socket: Socket) => {
     }
 
     // Push into queue
+    (socket as any)._queuedUsername = username || 'Challenger';
     quickMatchQueue.push(socket.id);
     socket.emit('room_update', {
       roomId: 'QUEUE',
       mode: 'quick',
+      cameraMode: desiredMode,
       phase: 'MATCHMAKING',
       phaseSecondsRemaining: 0,
       players: {},
@@ -449,6 +463,75 @@ io.on('connection', (socket: Socket) => {
       winnerId: null,
       winMessage: null,
     });
+  });
+
+  // 3b. Start Bot Match
+  socket.on('start_bot_match', ({ username, cameraMode }: { username: string; cameraMode?: 'camera' | 'no-camera' }) => {
+    // Remove from quickMatchQueue if queued
+    const qIdx = quickMatchQueue.indexOf(socket.id);
+    if (qIdx !== -1) quickMatchQueue.splice(qIdx, 1);
+
+    const roomId = 'BOT-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+    socket.join(roomId);
+
+    const botId = 'bot_' + Math.random().toString(36).substring(2, 6);
+    const botNames = ['Arjun @ Block 4 🤖', 'Kabir @ Tapri 🏏', 'Rohan @ MUJ 🧢', 'Vikram @ Hostel 🏆'];
+    const chosenBotName = botNames[Math.floor(Math.random() * botNames.length)];
+
+    const room: Room = {
+      roomId,
+      mode: 'quick',
+      cameraMode: cameraMode || 'camera',
+      phase: 'LOBBY',
+      phaseSecondsRemaining: 0,
+      players: {
+        [socket.id]: {
+          id: socket.id,
+          username: username || 'Player',
+          role: 'batsman',
+          isHost: true,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: socket.id,
+        },
+        [botId]: {
+          id: botId,
+          username: chosenBotName,
+          role: 'bowler',
+          isHost: false,
+          score: 0,
+          wickets: 0,
+          currentChoice: Math.floor(Math.random() * 6) + 1,
+          hasLockedIn: true,
+          avatarSeed: botId,
+        },
+      },
+      currentInning: 1,
+      maxOvers: 2,
+      totalBallsPerInning: 12,
+      currentBallsBowled: 0,
+      currentInningRuns: 0,
+      currentInningWickets: 0,
+      maxWicketsPerInning: 2,
+      targetRuns: null,
+      ballHistory: [],
+      lastBallResult: null,
+      winnerId: null,
+      winMessage: null,
+    };
+
+    rooms[roomId] = room;
+    broadcastRoom(room);
+    console.log(`[Bot Match Started] Room: ${roomId} for ${username} with ${chosenBotName}`);
+
+    // Auto-launch match countdown after 1.5s
+    setTimeout(() => {
+      if (rooms[roomId] && rooms[roomId].phase === 'LOBBY') {
+        startPhase1SecretDelivery(rooms[roomId]);
+      }
+    }, 1500);
   });
 
   // 4. Start Match Trigger

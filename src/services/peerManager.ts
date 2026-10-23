@@ -1,16 +1,18 @@
 import Peer, { type DataConnection, type MediaConnection } from 'peerjs';
-import type { RoomState, BallResult } from '../types/game';
+import type { RoomState, BallResult, CameraMode } from '../types/game';
 
 type EventHandler = (...args: any[]) => void;
 
 /**
- * Serverless P2P Game Adapter for Vercel Deployments
- * Uses free Google STUN and PeerJS public broker to enable 100% zero-cost
- * cross-device 1v1 play even without a Node.js backend running!
+ * Robust Zero-Cost P2P Game Adapter with:
+ * 1. BroadcastChannel (0ms local multi-tab sync)
+ * 2. PeerJS Public Broker (cross-device WebRTC mesh)
+ * 3. Autonomous Campus Bot (instant practice & queue fallback)
  */
 export class PeerGameAdapter {
   public id: string;
   public isHost: boolean = false;
+  public isBotOpponent: boolean = false;
   private peer: Peer | null = null;
   private conn: DataConnection | null = null;
   private mediaCall: MediaConnection | null = null;
@@ -19,9 +21,23 @@ export class PeerGameAdapter {
   private currentRoom: RoomState | null = null;
   private timerInterval: any = null;
   private targetPeerId: string | null = null;
+  private targetRoomCode: string | null = null;
+  private bc: BroadcastChannel | null = null;
+  private queueTimeout: any = null;
 
   constructor() {
     this.id = 'peer_' + Math.random().toString(36).substring(2, 9);
+
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        this.bc = new BroadcastChannel('campusclash_broadcast_mesh');
+        this.bc.onmessage = (event) => {
+          this.handleBroadcastMessage(event.data);
+        };
+      } catch (err) {
+        console.warn('BroadcastChannel initialization error:', err);
+      }
+    }
   }
 
   // Supply local camera/mic stream for peer calling
@@ -67,11 +83,13 @@ export class PeerGameAdapter {
 
   emit(event: string, payload?: any) {
     if (event === 'create_room') {
-      this.handleCreateRoom(payload?.username);
+      this.handleCreateRoom(payload?.username, payload?.cameraMode);
     } else if (event === 'join_room') {
       this.handleJoinRoom(payload?.roomId, payload?.username);
     } else if (event === 'quick_match') {
-      this.handleQuickMatch(payload?.username);
+      this.handleQuickMatch(payload?.username, payload?.cameraMode);
+    } else if (event === 'start_bot_match') {
+      this.startBotMatch(payload?.username, payload?.cameraMode);
     } else if (event === 'start_match') {
       this.handleStartMatch();
     } else if (event === 'submit_choice') {
@@ -83,6 +101,14 @@ export class PeerGameAdapter {
     } else {
       if (this.conn && this.conn.open) {
         this.conn.send({ type: event, payload });
+      }
+      if (this.bc && this.currentRoom) {
+        this.bc.postMessage({
+          type: event,
+          roomId: this.currentRoom.roomId,
+          senderId: this.id,
+          payload,
+        });
       }
     }
   }
@@ -98,150 +124,283 @@ export class PeerGameAdapter {
     });
   }
 
+  // Local tab-to-tab mesh handler
+  private handleBroadcastMessage(data: any) {
+    if (!data || data.senderId === this.id) return;
+
+    if (data.type === 'player_join') {
+      if (this.isHost && this.currentRoom && this.currentRoom.roomId === data.roomId) {
+        const guestId = data.senderId;
+        this.currentRoom.players[guestId] = {
+          id: guestId,
+          username: data.username || 'Challenger',
+          role: 'bowler',
+          isHost: false,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: guestId,
+        };
+
+        if (this.currentRoom.mode === 'quick') {
+          this.currentRoom.phase = 'LOBBY';
+        }
+        this.broadcastRoom();
+        this.trigger('peer_ready', { roomId: this.currentRoom.roomId });
+        if (this.bc) {
+          this.bc.postMessage({
+            type: 'peer_ready',
+            roomId: this.currentRoom.roomId,
+            senderId: this.id,
+          });
+        }
+      }
+    } else if (data.type === 'room_update') {
+      if (!this.isHost && this.targetRoomCode === data.roomId) {
+        this.currentRoom = data.payload;
+        this.trigger('room_update', data.payload);
+      }
+    } else if (data.type === 'countdown_tick') {
+      if (!this.isHost && this.targetRoomCode === data.roomId) {
+        this.trigger('countdown_tick', data.payload);
+      }
+    } else if (data.type === 'ball_resolved') {
+      if (!this.isHost && this.targetRoomCode === data.roomId) {
+        this.trigger('ball_resolved', data.payload);
+      }
+    } else if (data.type === 'game_over') {
+      if (!this.isHost && this.targetRoomCode === data.roomId) {
+        this.trigger('game_over', data.payload);
+      }
+    } else if (data.type === 'submit_choice') {
+      if (this.isHost && this.currentRoom && this.currentRoom.roomId === data.roomId) {
+        const player = this.currentRoom.players[data.senderId];
+        if (player) {
+          player.currentChoice = data.payload.choice;
+          player.hasLockedIn = true;
+          this.checkBothSubmitted();
+        }
+      }
+    } else if (data.type === 'start_match') {
+      if (this.isHost && this.currentRoom?.roomId === data.roomId) {
+        this.handleStartMatch();
+      }
+    } else if (data.type === 'next_ball') {
+      if (this.isHost && this.currentRoom?.roomId === data.roomId) {
+        this.handleNextBall();
+      }
+    } else if (data.type === 'rematch') {
+      if (this.isHost && this.currentRoom?.roomId === data.roomId) {
+        this.handleRematch();
+      }
+    }
+  }
+
   // 1. Host creates room
-  private handleCreateRoom(username: string) {
+  private handleCreateRoom(username: string, cameraMode?: CameraMode) {
     this.isHost = true;
+    this.isBotOpponent = false;
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
     for (let i = 0; i < 4; i++) {
       code += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     const peerId = `campusclash-${code}`;
+    const desiredCameraMode = cameraMode || 'camera';
 
-    this.peer = new Peer(peerId, {
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      },
-    });
-
-    this.peer.on('open', (id) => {
-      this.id = id;
-      const initialRoom: RoomState = {
-        roomId: code,
-        mode: 'party',
-        phase: 'LOBBY',
-        phaseSecondsRemaining: 0,
-        players: {
-          [id]: {
-            id,
-            username: username || 'Player 1',
-            role: 'batsman',
-            isHost: true,
-            score: 0,
-            wickets: 0,
-            currentChoice: null,
-            hasLockedIn: false,
-            avatarSeed: id,
-          },
+    const initialRoom: RoomState = {
+      roomId: code,
+      mode: 'party',
+      cameraMode: desiredCameraMode,
+      phase: 'LOBBY',
+      phaseSecondsRemaining: 0,
+      players: {
+        [this.id]: {
+          id: this.id,
+          username: username || 'Player 1',
+          role: 'batsman',
+          isHost: true,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: this.id,
         },
-        currentInning: 1,
-        maxOvers: 2,
-        totalBallsPerInning: 12,
-        currentBallsBowled: 0,
-        currentInningRuns: 0,
-        currentInningWickets: 0,
-        targetRuns: null,
-        ballHistory: [],
-        lastBallResult: null,
-        winnerId: null,
-        winMessage: null,
-      };
+      },
+      currentInning: 1,
+      maxOvers: 2,
+      totalBallsPerInning: 12,
+      currentBallsBowled: 0,
+      currentInningRuns: 0,
+      currentInningWickets: 0,
+      targetRuns: null,
+      ballHistory: [],
+      lastBallResult: null,
+      winnerId: null,
+      winMessage: null,
+    };
 
-      this.currentRoom = initialRoom;
-      this.trigger('room_update', initialRoom);
-    });
+    this.currentRoom = initialRoom;
+    this.trigger('room_update', initialRoom);
 
-    // Handle incoming data connection
-    this.peer.on('connection', (connection) => {
-      this.conn = connection;
-      this.setupConnectionListeners(connection);
-    });
-
-    // Handle incoming media call (Challenger calling Host)
-    this.peer.on('call', (call) => {
-      this.mediaCall = call;
-      if (this.localStream) {
-        call.answer(this.localStream);
-      } else {
-        // If local stream not yet ready, wait briefly
-        setTimeout(() => {
-          if (this.localStream) {
-            call.answer(this.localStream);
-          }
-        }, 800);
-      }
-
-      call.on('stream', (remoteStream) => {
-        this.trigger('remote_stream', remoteStream);
+    // Broadcast room presence locally immediately
+    if (this.bc) {
+      this.bc.postMessage({
+        type: 'room_update',
+        roomId: code,
+        senderId: this.id,
+        payload: initialRoom,
       });
-    });
+    }
 
-    this.peer.on('error', (err) => {
-      console.warn('Host Peer error:', err);
-      this.trigger('game_error', { message: 'Connection issue. Please retry.' });
-    });
+    try {
+      this.peer = new Peer(peerId, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+          ],
+        },
+      });
+
+      this.peer.on('open', (id) => {
+        this.id = id;
+        if (this.currentRoom) {
+          const oldMe = this.currentRoom.players[this.id];
+          if (!oldMe) {
+            this.currentRoom.players[id] = {
+              id,
+              username: username || 'Player 1',
+              role: 'batsman',
+              isHost: true,
+              score: 0,
+              wickets: 0,
+              currentChoice: null,
+              hasLockedIn: false,
+              avatarSeed: id,
+            };
+          }
+          this.broadcastRoom();
+        }
+      });
+
+      this.peer.on('connection', (connection) => {
+        this.conn = connection;
+        this.setupConnectionListeners(connection);
+      });
+
+      this.peer.on('call', (call) => {
+        this.mediaCall = call;
+        if (this.localStream) {
+          call.answer(this.localStream);
+        } else {
+          setTimeout(() => {
+            if (this.localStream) call.answer(this.localStream);
+          }, 800);
+        }
+
+        call.on('stream', (remoteStream) => {
+          this.trigger('remote_stream', remoteStream);
+        });
+      });
+
+      this.peer.on('error', (err) => {
+        console.warn('Host Peer warning:', err);
+      });
+    } catch (e) {
+      console.warn('Failed to initialize PeerJS host:', e);
+    }
   }
 
   // 2. Challenger joins room
   private handleJoinRoom(code: string, username: string) {
     this.isHost = false;
-    const targetPeerId = `campusclash-${code.toUpperCase()}`;
+    this.isBotOpponent = false;
+    const cleanCode = (code || '').trim().toUpperCase();
+    if (!cleanCode) return;
+
+    this.targetRoomCode = cleanCode;
+    const targetPeerId = `campusclash-${cleanCode}`;
     this.targetPeerId = targetPeerId;
 
-    this.peer = new Peer({
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      },
-    });
+    // Immediately notify via BroadcastChannel for instant local response
+    if (this.bc) {
+      this.bc.postMessage({
+        type: 'player_join',
+        roomId: cleanCode,
+        senderId: this.id,
+        username: username || 'Challenger',
+      });
+    }
 
-    this.peer.on('open', (id) => {
-      this.id = id;
-      const conn = this.peer!.connect(targetPeerId);
-      this.conn = conn;
+    try {
+      this.peer = new Peer({
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+          ],
+        },
+      });
 
-      conn.on('open', () => {
-        conn.send({
-          type: 'player_join',
-          payload: { id, username: username || 'Challenger' },
-        });
+      this.peer.on('open', (id) => {
+        this.id = id;
+        const conn = this.peer!.connect(targetPeerId);
+        this.conn = conn;
 
-        // If local stream already captured, initiate media call to Host
+        const sendJoin = () => {
+          conn.send({
+            type: 'player_join',
+            payload: { id, username: username || 'Challenger' },
+          });
+
+          if (this.localStream) {
+            this.initiateMediaCall(targetPeerId);
+          }
+        };
+
+        if (conn.open) {
+          sendJoin();
+        } else {
+          conn.on('open', sendJoin);
+        }
+
+        this.setupConnectionListeners(conn);
+      });
+
+      this.peer.on('call', (call) => {
+        this.mediaCall = call;
         if (this.localStream) {
-          this.initiateMediaCall(targetPeerId);
+          call.answer(this.localStream);
+        }
+        call.on('stream', (remoteStream) => {
+          this.trigger('remote_stream', remoteStream);
+        });
+      });
+
+      this.peer.on('error', (err) => {
+        console.warn('Challenger Peer error:', err);
+        // If not already resolved by BroadcastChannel
+        if (!this.currentRoom) {
+          this.trigger('game_error', { message: 'Could not connect to room. Check the 4-letter code.' });
         }
       });
-
-      this.setupConnectionListeners(conn);
-    });
-
-    // Also listen for incoming calls
-    this.peer.on('call', (call) => {
-      this.mediaCall = call;
-      if (this.localStream) {
-        call.answer(this.localStream);
-      }
-      call.on('stream', (remoteStream) => {
-        this.trigger('remote_stream', remoteStream);
-      });
-    });
-
-    this.peer.on('error', (err) => {
-      console.warn('Challenger Peer error:', err);
-      this.trigger('game_error', { message: 'Could not connect to room. Check the code.' });
-    });
+    } catch (err) {
+      console.warn('Challenger Peer init error:', err);
+    }
   }
 
-  private handleQuickMatch(username: string) {
-    this.isHost = false;
+  // 3. Quick Match Queue (with instant Campus Bot fallback)
+  private handleQuickMatch(username: string, cameraMode?: CameraMode) {
+    this.isHost = true;
+    this.isBotOpponent = false;
+    const desiredCameraMode = cameraMode || 'camera';
+
     const initialQueueRoom: RoomState = {
       roomId: '1v1 QUICK',
       mode: 'quick',
+      cameraMode: desiredCameraMode,
       phase: 'MATCHMAKING',
       phaseSecondsRemaining: 0,
       players: {
@@ -273,142 +432,87 @@ export class PeerGameAdapter {
     this.currentRoom = initialQueueRoom;
     this.trigger('room_update', initialQueueRoom);
 
-    // Try finding an active peer waiting in public matchmaking pool
-    const queueSlots = ['campusclash-queue-pool-1', 'campusclash-queue-pool-2'];
-    this.tryJoinQueueSlot(queueSlots, 0, username);
-  }
-
-  private tryJoinQueueSlot(slots: string[], index: number, username: string) {
-    if (index >= slots.length) {
-      this.becomeQueueHost(slots[0], username);
-      return;
-    }
-
-    const targetSlot = slots[index];
-    const probePeer = new Peer({
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      },
-    });
-
-    let hasHandled = false;
-
-    probePeer.on('open', (id) => {
-      this.peer = probePeer;
-      this.id = id;
-      this.targetPeerId = targetSlot;
-      const conn = probePeer.connect(targetSlot);
-      this.conn = conn;
-
-      conn.on('open', () => {
-        hasHandled = true;
-        this.isHost = false;
-        conn.send({
-          type: 'player_join',
-          payload: { id, username: username || 'Challenger' },
-        });
-
-        if (this.localStream) {
-          this.initiateMediaCall(targetSlot);
-        }
-      });
-
-      this.setupConnectionListeners(conn);
-
-      probePeer.on('call', (call) => {
-        this.mediaCall = call;
-        if (this.localStream) {
-          call.answer(this.localStream);
-        }
-        call.on('stream', (remoteStream) => {
-          this.trigger('remote_stream', remoteStream);
-        });
-      });
-    });
-
-    probePeer.on('error', (_err: any) => {
-      if (hasHandled) return;
-      hasHandled = true;
-      try {
-        probePeer.destroy();
-      } catch (e) {}
-
-      // Slot is available with no host -> WE become the host on this slot!
-      this.becomeQueueHost(targetSlot, username);
-    });
-  }
-
-  private becomeQueueHost(slotId: string, username: string) {
-    this.isHost = true;
-    const hostPeer = new Peer(slotId, {
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      },
-    });
-
-    hostPeer.on('open', (id) => {
-      this.peer = hostPeer;
-      this.id = id;
-      const queueRoom: RoomState = {
-        roomId: '1v1 QUICK',
-        mode: 'quick',
-        phase: 'MATCHMAKING',
-        phaseSecondsRemaining: 0,
-        players: {
-          [id]: {
-            id,
-            username: username || 'Player 1',
-            role: 'batsman',
-            isHost: true,
-            score: 0,
-            wickets: 0,
-            currentChoice: null,
-            hasLockedIn: false,
-            avatarSeed: id,
-          },
-        },
-        currentInning: 1,
-        maxOvers: 2,
-        totalBallsPerInning: 12,
-        currentBallsBowled: 0,
-        currentInningRuns: 0,
-        currentInningWickets: 0,
-        targetRuns: null,
-        ballHistory: [],
-        lastBallResult: null,
-        winnerId: null,
-        winMessage: null,
-      };
-
-      this.currentRoom = queueRoom;
-      this.trigger('room_update', queueRoom);
-    });
-
-    hostPeer.on('connection', (connection) => {
-      this.conn = connection;
-      this.setupConnectionListeners(connection);
-    });
-
-    hostPeer.on('call', (call) => {
-      this.mediaCall = call;
-      if (this.localStream) {
-        call.answer(this.localStream);
+    // Auto-match with Campus Bot after 3.5 seconds if no real player arrives
+    clearTimeout(this.queueTimeout);
+    this.queueTimeout = setTimeout(() => {
+      if (this.currentRoom?.phase === 'MATCHMAKING') {
+        this.startBotMatch(username, desiredCameraMode);
       }
-      call.on('stream', (remoteStream) => {
-        this.trigger('remote_stream', remoteStream);
-      });
-    });
+    }, 3500);
 
-    hostPeer.on('error', (err: any) => {
-      console.warn('Queue host error (slot taken, fallback to random room):', err);
-      this.handleCreateRoom(username);
-    });
+    // Probe broadcast channel for any other tab in MATCHMAKING
+    if (this.bc) {
+      this.bc.postMessage({
+        type: 'queue_probe',
+        senderId: this.id,
+        username,
+        cameraMode: desiredCameraMode,
+      });
+    }
+  }
+
+  // 4. Instant Campus Bot Duel
+  public startBotMatch(username: string, cameraMode?: CameraMode) {
+    clearTimeout(this.queueTimeout);
+    this.isHost = true;
+    this.isBotOpponent = true;
+    const botId = 'bot_campus_' + Math.random().toString(36).substring(2, 6);
+    const botNames = ['Arjun @ Block 4 🤖', 'Kabir @ Tapri 🏏', 'Rohan @ MUJ 🧢', 'Vikram @ Hostel 🏆'];
+    const chosenBotName = botNames[Math.floor(Math.random() * botNames.length)];
+    const desiredCameraMode = cameraMode || this.currentRoom?.cameraMode || 'camera';
+
+    const room: RoomState = {
+      roomId: 'BOT-1V1',
+      mode: 'quick',
+      cameraMode: desiredCameraMode,
+      phase: 'LOBBY',
+      phaseSecondsRemaining: 0,
+      players: {
+        [this.id]: {
+          id: this.id,
+          username: username || 'Player',
+          role: 'batsman',
+          isHost: true,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: this.id,
+        },
+        [botId]: {
+          id: botId,
+          username: chosenBotName,
+          role: 'bowler',
+          isHost: false,
+          score: 0,
+          wickets: 0,
+          currentChoice: null,
+          hasLockedIn: false,
+          avatarSeed: botId,
+        },
+      },
+      currentInning: 1,
+      maxOvers: 2,
+      totalBallsPerInning: 12,
+      currentBallsBowled: 0,
+      currentInningRuns: 0,
+      currentInningWickets: 0,
+      targetRuns: null,
+      ballHistory: [],
+      lastBallResult: null,
+      winnerId: null,
+      winMessage: null,
+    };
+
+    this.currentRoom = room;
+    this.trigger('room_update', room);
+
+    // Automatically launch duel after a 1.5s visual confirmation
+    setTimeout(() => {
+      if (this.currentRoom?.phase === 'LOBBY') {
+        this.handleStartMatch();
+      }
+    }, 1500);
   }
 
   private setupConnectionListeners(conn: DataConnection) {
@@ -429,15 +533,16 @@ export class PeerGameAdapter {
           avatarSeed: guestId,
         };
 
-        // When in quick match, transition from MATCHMAKING to LOBBY (Opponent matched!)
         if (this.currentRoom.mode === 'quick') {
           this.currentRoom.phase = 'LOBBY';
         }
         this.broadcastRoom();
         this.trigger('peer_ready', { roomId: this.currentRoom.roomId });
-        conn.send({ type: 'peer_ready', payload: { roomId: this.currentRoom.roomId } });
+        try {
+          conn.send({ type: 'room_update', payload: this.currentRoom });
+          conn.send({ type: 'peer_ready', payload: { roomId: this.currentRoom.roomId } });
+        } catch (e) {}
 
-        // If host has stream, call challenger as well for bi-directional AV
         if (this.localStream && this.peer) {
           try {
             const call = this.peer.call(guestId, this.localStream);
@@ -482,7 +587,17 @@ export class PeerGameAdapter {
     if (!this.currentRoom) return;
     this.trigger('room_update', this.currentRoom);
     if (this.conn && this.conn.open) {
-      this.conn.send({ type: 'room_update', payload: this.currentRoom });
+      try {
+        this.conn.send({ type: 'room_update', payload: this.currentRoom });
+      } catch (e) {}
+    }
+    if (this.bc) {
+      this.bc.postMessage({
+        type: 'room_update',
+        roomId: this.currentRoom.roomId,
+        senderId: this.id,
+        payload: this.currentRoom,
+      });
     }
   }
 
@@ -490,6 +605,13 @@ export class PeerGameAdapter {
     if (!this.isHost || !this.currentRoom) {
       if (this.conn && this.conn.open) {
         this.conn.send({ type: 'start_match' });
+      }
+      if (this.bc && this.currentRoom) {
+        this.bc.postMessage({
+          type: 'start_match',
+          roomId: this.currentRoom.roomId,
+          senderId: this.id,
+        });
       }
       return;
     }
@@ -509,13 +631,39 @@ export class PeerGameAdapter {
     }
     this.broadcastRoom();
 
+    // If opponent is a bot, pick bot choice in advance
+    if (this.isBotOpponent) {
+      const bot = Object.values(this.currentRoom.players).find((p) => p.id !== this.id);
+      if (bot) {
+        // Smart realistic hand cricket probability (weight towards 1,2,4,6)
+        const roll = [1, 2, 2, 3, 4, 4, 5, 6, 6];
+        bot.currentChoice = roll[Math.floor(Math.random() * roll.length)];
+      }
+    }
+
     this.timerInterval = setInterval(() => {
       if (!this.currentRoom) return;
       this.currentRoom.phaseSecondsRemaining -= 1;
       const tick = { seconds: this.currentRoom.phaseSecondsRemaining };
       this.trigger('countdown_tick', tick);
       if (this.conn && this.conn.open) {
-        this.conn.send({ type: 'countdown_tick', payload: tick });
+        try {
+          this.conn.send({ type: 'countdown_tick', payload: tick });
+        } catch (e) {}
+      }
+      if (this.bc) {
+        this.bc.postMessage({
+          type: 'countdown_tick',
+          roomId: this.currentRoom.roomId,
+          senderId: this.id,
+          payload: tick,
+        });
+      }
+
+      // If bot, mark as locked in at 2 seconds
+      if (this.isBotOpponent && this.currentRoom.phaseSecondsRemaining === 2) {
+        const bot = Object.values(this.currentRoom.players).find((p) => p.id !== this.id);
+        if (bot) bot.hasLockedIn = true;
       }
 
       if (this.currentRoom.phaseSecondsRemaining <= 0) {
@@ -536,7 +684,17 @@ export class PeerGameAdapter {
 
     if (!this.isHost) {
       if (this.conn && this.conn.open) {
-        this.conn.send({ type: 'submit_choice', payload: { choice } });
+        try {
+          this.conn.send({ type: 'submit_choice', payload: { choice } });
+        } catch (e) {}
+      }
+      if (this.bc) {
+        this.bc.postMessage({
+          type: 'submit_choice',
+          roomId: this.currentRoom.roomId,
+          senderId: this.id,
+          payload: { choice },
+        });
       }
     } else {
       this.checkBothSubmitted();
@@ -574,10 +732,10 @@ export class PeerGameAdapter {
     let commentary = '';
     if (isWicket) {
       this.currentRoom.currentInningWickets += 1;
-      commentary = `OUT! Clean bowled! Both chose ${batsmanChoice}!`;
+      commentary = `OUT! Clean bowled! Both showed ${batsmanChoice}!`;
     } else {
       this.currentRoom.currentInningRuns += runsScored;
-      commentary = runsScored === 6 ? 'MAXIMUM! Hit out of the campus for SIX!' : `Scored ${runsScored} runs!`;
+      commentary = runsScored === 6 ? 'MAXIMUM! Hit over the campus wall for SIX!' : `Scored ${runsScored} runs!`;
     }
 
     const ballResult: BallResult = {
@@ -595,7 +753,17 @@ export class PeerGameAdapter {
 
     this.trigger('ball_resolved', ballResult);
     if (this.conn && this.conn.open) {
-      this.conn.send({ type: 'ball_resolved', payload: ballResult });
+      try {
+        this.conn.send({ type: 'ball_resolved', payload: ballResult });
+      } catch (e) {}
+    }
+    if (this.bc) {
+      this.bc.postMessage({
+        type: 'ball_resolved',
+        roomId: this.currentRoom.roomId,
+        senderId: this.id,
+        payload: ballResult,
+      });
     }
     this.broadcastRoom();
 
@@ -627,7 +795,7 @@ export class PeerGameAdapter {
       if (isInningOver) {
         this.currentRoom.phase = 'GAME_OVER';
         this.currentRoom.winnerId = defending?.id || null;
-        this.currentRoom.winMessage = `${defending?.username} won the match! 🏆`;
+        this.currentRoom.winMessage = `${defending?.username} defended the target! 🏆`;
         this.broadcastRoom();
         this.trigger('game_over', { winnerId: this.currentRoom.winnerId });
         if (this.conn?.open) this.conn.send({ type: 'game_over', payload: { winnerId: this.currentRoom.winnerId } });
@@ -668,7 +836,11 @@ export class PeerGameAdapter {
       this.currentRoom.phaseSecondsRemaining -= 1;
       const tick = { seconds: this.currentRoom.phaseSecondsRemaining };
       this.trigger('countdown_tick', tick);
-      if (this.conn?.open) this.conn.send({ type: 'countdown_tick', payload: tick });
+      if (this.conn?.open) {
+        try {
+          this.conn.send({ type: 'countdown_tick', payload: tick });
+        } catch (e) {}
+      }
 
       if (this.currentRoom.phaseSecondsRemaining <= 0) {
         clearInterval(this.timerInterval);
@@ -680,6 +852,13 @@ export class PeerGameAdapter {
   private handleNextBall() {
     if (!this.isHost) {
       if (this.conn?.open) this.conn.send({ type: 'next_ball' });
+      if (this.bc && this.currentRoom) {
+        this.bc.postMessage({
+          type: 'next_ball',
+          roomId: this.currentRoom.roomId,
+          senderId: this.id,
+        });
+      }
       return;
     }
     if (this.currentRoom?.phase === 'PHASE_3_BANTER' || this.currentRoom?.phase === 'INNING_TRANSITION') {
@@ -691,6 +870,13 @@ export class PeerGameAdapter {
   private handleRematch() {
     if (!this.isHost) {
       if (this.conn?.open) this.conn.send({ type: 'rematch' });
+      if (this.bc && this.currentRoom) {
+        this.bc.postMessage({
+          type: 'rematch',
+          roomId: this.currentRoom.roomId,
+          senderId: this.id,
+        });
+      }
       return;
     }
     if (!this.currentRoom) return;
@@ -705,13 +891,30 @@ export class PeerGameAdapter {
     this.currentRoom.lastBallResult = null;
     this.currentRoom.winnerId = null;
     this.currentRoom.winMessage = null;
+    for (const p of Object.values(this.currentRoom.players)) {
+      p.score = 0;
+      p.wickets = 0;
+      p.currentChoice = null;
+      p.hasLockedIn = false;
+      p.role = p.isHost ? 'batsman' : 'bowler';
+    }
     this.broadcastRoom();
+
+    if (this.isBotOpponent) {
+      setTimeout(() => {
+        if (this.currentRoom?.phase === 'LOBBY') {
+          this.handleStartMatch();
+        }
+      }, 1000);
+    }
   }
 
   public disconnect() {
     clearInterval(this.timerInterval);
+    clearTimeout(this.queueTimeout);
     if (this.mediaCall) this.mediaCall.close();
     if (this.conn) this.conn.close();
     if (this.peer) this.peer.destroy();
+    if (this.bc) this.bc.close();
   }
 }

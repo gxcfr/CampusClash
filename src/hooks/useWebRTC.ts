@@ -6,6 +6,7 @@ export interface UseWebRTCOptions {
   isHost: boolean;
   isOpponentConnected: boolean;
   remoteAudioMuted?: boolean;
+  enabled?: boolean;
 }
 
 const ICE_SERVERS: RTCConfiguration = {
@@ -22,6 +23,7 @@ export function useWebRTC({
   isHost,
   isOpponentConnected,
   remoteAudioMuted = false,
+  enabled = true,
 }: UseWebRTCOptions) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -36,6 +38,14 @@ export function useWebRTC({
 
   // 1. Initialize Local Media Stream with robust Audio/Video fallback
   useEffect(() => {
+    if (!enabled) {
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => track.stop());
+        localStreamRef.current = null;
+        setLocalStream(null);
+      }
+      return;
+    }
     let active = true;
 
     async function startCamera() {

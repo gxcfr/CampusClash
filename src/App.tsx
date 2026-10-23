@@ -4,6 +4,7 @@ import { MainLobby } from './components/MainLobby';
 import { HandCricketArena } from './components/HandCricketArena';
 import { UsernameModal } from './components/UsernameModal';
 import { PeerGameAdapter } from './services/peerManager';
+import type { CameraMode } from './types/game';
 
 export const App: React.FC = () => {
   // Pure Guest Auth in localStorage
@@ -11,6 +12,7 @@ export const App: React.FC = () => {
     return localStorage.getItem('campusclash_guest_username') || '';
   });
   const [isFirstEntryPromptOpen, setIsFirstEntryPromptOpen] = useState(false);
+  const [cameraMode, setCameraMode] = useState<CameraMode>('camera');
 
   // Simple client routing ('/' vs '/games/hand-cricket')
   const [currentPath, setCurrentPath] = useState<string>(() => {
@@ -26,40 +28,60 @@ export const App: React.FC = () => {
     }
   }, [username]);
 
-  // Connect to Authoritative Signaling
+  // Connect to Authoritative Signaling or Fallback to P2P Mesh
   useEffect(() => {
+    let active = true;
     const customServer = (import.meta as any).env?.VITE_SERVER_URL;
-    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const hostname = window.location.hostname;
+    const isLocal =
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname.startsWith('192.168.') ||
+      hostname.startsWith('10.');
+
+    let activeSocket: Socket | null = null;
+    let peerAdapter: PeerGameAdapter | null = null;
+    let hasFallback = false;
 
     if (customServer || isLocal) {
-      const serverUrl = customServer || 'http://localhost:3001';
+      const serverPort = 3001;
+      const serverUrl = customServer || `http://${hostname || 'localhost'}:${serverPort}`;
+
       const socket = io(serverUrl, {
         transports: ['websocket', 'polling'],
-        timeout: 3000,
+        timeout: 2000,
+        reconnectionAttempts: 1,
       });
+      activeSocket = socket;
 
       socket.on('connect', () => {
+        if (!active) return;
         setGameChannel(socket);
       });
 
       socket.on('connect_error', () => {
-        // Fallback to serverless PeerGameAdapter if local server isn't running or blocked
-        if (!gameChannel) {
-          const peerAdapter = new PeerGameAdapter();
-          setGameChannel(peerAdapter);
-        }
+        if (!active || hasFallback) return;
+        hasFallback = true;
+        try {
+          socket.disconnect();
+        } catch (e) {}
+
+        peerAdapter = new PeerGameAdapter();
+        setGameChannel(peerAdapter);
       });
 
       return () => {
-        socket.disconnect();
+        active = false;
+        if (activeSocket) activeSocket.disconnect();
+        if (peerAdapter) peerAdapter.disconnect();
       };
     } else {
-      // Deployed on Vercel / Cloud: Use PeerJS Zero-Cost P2P Mesh
-      const peerAdapter = new PeerGameAdapter();
+      peerAdapter = new PeerGameAdapter();
       setGameChannel(peerAdapter);
 
       return () => {
-        peerAdapter.disconnect();
+        active = false;
+        if (peerAdapter) peerAdapter.disconnect();
       };
     }
   }, []);
@@ -85,20 +107,22 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-arcade-bg text-slate-100">
+    <div className="min-h-screen bg-[#0e121a] text-slate-100">
       {/* Route matching */}
       {currentPath.startsWith('/games/hand-cricket') ? (
         <HandCricketArena
           socket={gameChannel}
           username={username || 'GuestPlayer'}
           onLeaveArena={() => navigateTo('/')}
+          initialCameraMode={cameraMode}
         />
       ) : (
         <MainLobby
           username={username}
           onUpdateUsername={handleUpdateUsername}
-          onSelectGame={(gameId) => {
+          onSelectGame={(gameId, mode) => {
             if (gameId === 'hand-cricket') {
+              if (mode) setCameraMode(mode);
               navigateTo('/games/hand-cricket');
             }
           }}
